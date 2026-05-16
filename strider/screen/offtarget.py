@@ -86,10 +86,12 @@ class OffTargetScreener:
         Screen a query against the loaded database.
 
         Returns top hits ranked by ΔΔG (most negative = most concerning).
+        ΔΔG is computed as G(query·ref complex) − G(query) − G(ref) via pfunc,
+        so it correctly accounts for mismatches and partial complementarity.
         """
         seq = sequence.upper().replace("U", "T")
 
-        # K-mer pre-filter
+        # K-mer pre-filter (forward + RC k-mers so complements are findable)
         candidates = self._kmer_candidates(seq)
         if not candidates:
             candidates = list(self._db.keys())[:100]  # fallback: scan all
@@ -98,11 +100,14 @@ class OffTargetScreener:
         for name in candidates[:200]:  # cap at 200 for speed
             ref = self._db[name].upper().replace("U", "T")
             try:
-                ddg = self.engine.duplex_dg(seq, ref)
+                ddg = self.engine.ddg([seq, ref], [[seq, ref]])
             except Exception:
                 continue
             if ddg < ddg_threshold:
-                shared = len(set(_kmers(seq, self.kmer_k)) & set(_kmers(ref, self.kmer_k)))
+                shared = len(
+                    set(_kmers(seq, self.kmer_k))
+                    & (set(_kmers(ref, self.kmer_k)) | set(_kmers(_rc(ref), self.kmer_k)))
+                )
                 hits.append(OffTargetHit(
                     name=name,
                     sequence=ref,
@@ -124,30 +129,44 @@ class OffTargetScreener:
     def specificity_vs(
         self,
         sequence: str,
-        family_members: list[str],
+        family_members: dict[str, str] | list[str],
         target: str,
     ) -> dict[str, float]:
         """
         Compute ΔΔG selectivity vs. a set of related sequences.
 
-        Returns {family_member_seq: ΔΔG_vs_target} where positive = more selective.
+        family_members : dict {name: sequence} or list of sequences.
+        target         : the specific target sequence (DNA string).
+
+        Returns {name: ΔΔG_member − ΔΔG_target} where positive = weaker binding
+        to member than to target (i.e., probe is selective for target).
         """
         seq = sequence.upper().replace("U", "T")
         tgt = target.upper().replace("U", "T")
-        ddg_target = self.engine.duplex_dg(seq, tgt)
+        ddg_target = self.engine.ddg([seq, tgt], [[seq, tgt]])
+
+        if isinstance(family_members, dict):
+            items: list[tuple[str, str]] = list(family_members.items())
+        else:
+            items = [(m, m) for m in family_members]
+
         results: dict[str, float] = {}
-        for member in family_members:
-            m = member.upper().replace("U", "T")
+        for name, member_seq in items:
+            m = member_seq.upper().replace("U", "T")
             try:
-                ddg_m = self.engine.duplex_dg(seq, m)
-                results[member] = ddg_m - ddg_target  # positive = more selective vs target
+                ddg_m = self.engine.ddg([seq, m], [[seq, m]])
+                results[str(name)] = ddg_m - ddg_target
             except Exception:
-                results[member] = float("nan")
+                results[str(name)] = float("nan")
         return results
 
     def _build_kmer_index(self, seqs: dict[str, str]) -> None:
         for name, seq in seqs.items():
-            for kmer in _kmers(seq.upper().replace("U", "T"), self.kmer_k):
+            s = seq.upper().replace("U", "T")
+            for kmer in _kmers(s, self.kmer_k):
+                self._kmer_index.setdefault(kmer, []).append(name)
+            # Index RC k-mers so that complementary query sequences find this entry
+            for kmer in _kmers(_rc(s), self.kmer_k):
                 self._kmer_index.setdefault(kmer, []).append(name)
 
     def _kmer_candidates(self, query: str) -> list[str]:
@@ -159,6 +178,13 @@ class OffTargetScreener:
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+_COMP = str.maketrans("ACGT", "TGCA")
+
+
+def _rc(seq: str) -> str:
+    return seq.translate(_COMP)[::-1]
+
 
 def _kmers(seq: str, k: int) -> list[str]:
     return [seq[i : i + k] for i in range(len(seq) - k + 1)]

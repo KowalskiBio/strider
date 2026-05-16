@@ -9,15 +9,21 @@ Demonstrates the complete strider↔mantis integration:
 5. Plot signal accumulation
 """
 
+import pathlib
+import matplotlib
+matplotlib.use("Agg")
+matplotlib.rcParams.update({"font.family": "STIXGeneral", "mathtext.fontset": "stix"})
 import matplotlib.pyplot as plt
 from strider import ThermoEngine, CHABridge
 from strider.kinetics.tmsd import toehold_kf
 
-# ── Sequences (best from claude_codesign.py v3) ─────────────────────────────
+_here = pathlib.Path(__file__).parent
+
+# ── Sequences (from verify_codesign.py matching 04_cha_cascade.py) ──────────
 MIR21_SEQ = "TAGCTTATCAGACTGATGTTGA"
-H1_SEQ    = "TCAACATCAGTCTGATACCTCCCTCCTTATCAGACTGA"
-H2_SEQ    = "TCAGTCTGATAAGGGTGGAGGTATCAGACTGATGTTGATTTTT"
-CP_SEQ    = "AAAAA"
+H1_SEQ    = "TCAACATCAGTCTGATAAGCTAACTTAATTAAGTTAGCTTATCAGACTG"
+H2_SEQ    = "CAGTCTGATAAGCTAACTTAATTAAGTTAGCTTATCAGACTGATGTTGACCCAACAT"
+CP_SEQ    = "ATGTTGGG"
 
 # ── 1. Engine ────────────────────────────────────────────────────────────────
 engine = ThermoEngine(material="dna", celsius=37.0, sodium=0.137, magnesium=0.01, backend="native")
@@ -27,9 +33,9 @@ print(f"Backend: {engine.backend_name}")
 bridge = CHABridge(
     sequences={"mirna": MIR21_SEQ, "H1": H1_SEQ, "H2": H2_SEQ, "CP": CP_SEQ},
     engine=engine,
-    toehold_d1=6,
-    toehold_d2=11,
-    tail_cp=5,
+    toehold_d1=7,
+    toehold_d2=15,
+    tail_cp=8,
 )
 
 # ── 3. Thermodynamic pathway ─────────────────────────────────────────────────
@@ -102,7 +108,7 @@ try:
         energy_landscape(pathway_states, ax=axes[1], title="CHA Energy Landscape")
 
         plt.tight_layout()
-        plt.savefig("cha_pipeline.png", dpi=120, bbox_inches="tight")
+        fig.savefig(_here / "cha_pipeline.png", dpi=150, bbox_inches="tight")
         print("\n  Saved: cha_pipeline.png")
     else:
         print("  Simulation failed to converge.")

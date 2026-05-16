@@ -192,10 +192,10 @@ class CHABridge:
         g_h2 = eng.pfunc(H2).free_energy if H2 else 0.0
         g_cp = eng.pfunc(CP).free_energy if CP else 0.0
 
-        # Complex free energies (duplex approximation)
-        g_mirna_h1 = eng.duplex_dg(mirna, H1) if mirna and H1 else 0.0
-        g_h1h2 = eng.duplex_dg(H1, H2) if H1 and H2 else 0.0
-        g_h1h2_cp = eng.duplex_dg(H1 + H2, CP) if H1 and H2 and CP else 0.0
+        # Complex free energies via multi-strand pfunc (sequence-aware, handles mismatches)
+        g_mirna_h1 = eng.pfunc(mirna, H1).free_energy if mirna and H1 else 0.0
+        g_h1h2 = eng.pfunc(H1, H2).free_energy if H1 and H2 else 0.0
+        g_h1h2_cp = eng.pfunc(H1, H2, CP).free_energy if H1 and H2 and CP else 0.0
 
         ddg_r1 = g_mirna_h1 - g_mirna - g_h1
         ddg_r2 = (g_h1h2 + g_mirna) - (g_mirna_h1 + g_h2)
@@ -203,7 +203,7 @@ class CHABridge:
         ddg_spont = g_h1h2 - g_h1 - g_h2
 
         # CP leakage: CP binding H2 alone (before triggering)
-        g_h2_cp = eng.duplex_dg(H2, CP) if H2 and CP else 0.0
+        g_h2_cp = eng.pfunc(H2, CP).free_energy if H2 and CP else 0.0
         cp_leakage = g_h2_cp - g_h2 - g_cp
 
         self._ddg_cache = {

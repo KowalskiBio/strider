@@ -6,10 +6,20 @@ Covers:
 - Partition function and base-pair probabilities
 - Arc diagram and mountain plot visualization
 - H-type pseudoknot detection
-- Comparing natural vs designed hairpin structures
+- AT-stem vs GC-stem molecular beacon: stability tradeoff
+
+Two molecular beacon sequences are analysed:
+  BEACON_AT — 4-nt AT stem (lower stability, faster opening)
+  BEACON_GC — 4-nt GC stem (higher stability, better selectivity)
+This reflects a real design tradeoff in molecular beacon engineering:
+a stable stem improves background rejection but slows target opening.
 """
 
+import pathlib
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+matplotlib.rcParams.update({"font.family": "STIXGeneral", "mathtext.fontset": "stix"})
 import matplotlib.pyplot as plt
 from strider import ThermoEngine
 from strider.structure.dot_bracket import parse_pairs, stem_regions, unpaired_positions
@@ -18,20 +28,21 @@ from strider.structure.pseudoknot import fold_pseudoknot
 from strider.viz.arc import arc_diagram
 from strider.viz.mountain_plot import mountain_plot
 
+_here = pathlib.Path(__file__).parent
+
 engine = ThermoEngine(material="dna", celsius=37.0, sodium=0.137, magnesium=0.01)
-# Native engine used for pair-probability calculations: the NUPACK backend
-# returns ensemble ΔG accurately but our wrapper does not call nupack.pairs().
 engine_native = ThermoEngine(material="dna", celsius=37.0, sodium=0.137,
                               magnesium=0.01, backend="native")
 
-# ── 1. MFE folding of H1 and H2 ─────────────────────────────────────────────
-H1 = "TCAACATCAGTCTGATACCTCCCTCCTTATCAGACTGA"
-H2 = "TCAGTCTGATAAGGGTGGAGGTATCAGACTGATGTTGATTTTT"
+# Molecular beacon sequences with contrasting stem stability
+BEACON_AT = "ATATTTTTTTTTTTTATAT"   # 19 nt: 4-nt AT stem (palindrome) + 11-T loop
+BEACON_GC = "CGCGTTTTTTTTTTTTCGCG"  # 20 nt: 4-nt GC stem (palindrome) + 12-T loop
 
+# ── 1. MFE folding ───────────────────────────────────────────────────────────
 print("── MFE Folding ──────────────────────────────────────────────")
-for name, seq in [("H1", H1), ("H2", H2)]:
+for name, seq in [("BEACON_AT", BEACON_AT), ("BEACON_GC", BEACON_GC)]:
     structure, energy, pairs = fold_mfe(seq, celsius=37.0, material="dna")
-    stems   = stem_regions(structure)
+    stems    = stem_regions(structure)
     unpaired = unpaired_positions(structure)
     print(f"\n  {name} ({len(seq)} nt)")
     print(f"    Sequence:  {seq}")
@@ -41,27 +52,23 @@ for name, seq in [("H1", H1), ("H2", H2)]:
     print(f"    Unpaired: {len(unpaired)} positions")
 
 # ── 2. Base-pair probabilities from partition function ───────────────────────
-# Using native backend: it runs the McCaskill DP which produces pair_probs.
-# (The NUPACK backend gives more accurate ΔG but our wrapper omits nupack.pairs().)
 print("\n── Base-pair probability profiles (native DP) ───────────────")
-for name, seq in [("H1", H1), ("H2", H2)]:
-    result_nupack = engine.pfunc(seq)          # accurate ΔG
-    result_native = engine_native.pfunc(seq)   # pair probabilities
+for name, seq in [("BEACON_AT", BEACON_AT), ("BEACON_GC", BEACON_GC)]:
+    result_nupack = engine.pfunc(seq)
+    result_native = engine_native.pfunc(seq)
     probs = result_native.pair_probs
     p_paired = probs.sum(axis=1)
-    toehold_p = p_paired[:6].mean() if name == "H1" else None
+    stem_p = p_paired[:4].mean()    # 4-nt stem region
+    loop_p = p_paired[4:-4].mean()  # T-rich loop
     print(f"\n  {name}: ΔG (nupack) = {result_nupack.free_energy:+.2f} kcal/mol  "
           f"ΔG (native) = {result_native.free_energy:+.2f}")
-    print(f"    Mean pairing prob (all):      {p_paired.mean():.3f}")
-    if toehold_p is not None:
-        print(f"    Mean pairing prob (toehold):  {toehold_p:.3f}  ← low = accessible")
+    print(f"    Mean pairing prob (stem [0:4]):  {stem_p:.3f}  ← high = stable stem")
+    print(f"    Mean pairing prob (loop [4:-4]): {loop_p:.3f}  ← low = open loop")
 
 # ── 3. Pseudoknot search ────────────────────────────────────────────────────
 # Synthetic sequence with a known H-type pseudoknot for demonstration
 print("\n── Pseudoknot detection ─────────────────────────────────────")
-# Simple H-type: stem1 = AAAA:TTTT, stem2 = CCCC:GGGG with crossing
-PK_SEQ = "AAAALLLCCCCLLTTTTLLLGGGG".replace("L", "A")  # placeholder loop
-PK_SEQ = "AAAACCCCAAAATTTTGGGG"  # simplified test sequence
+PK_SEQ = "AAAACCCCAAAATTTTGGGG"  # simplified H-type test sequence
 struct_pk, energy_pk, pairs_pk = fold_pseudoknot(PK_SEQ, celsius=37.0)
 print(f"  Sequence:  {PK_SEQ}")
 print(f"  Structure: {struct_pk}  ([] = pseudoknot pairs)")
@@ -73,29 +80,33 @@ else:
 
 # ── 4. Visualization ─────────────────────────────────────────────────────────
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-fig.suptitle("strider — Hairpin Folding Analysis", fontsize=14, fontweight="bold")
+fig.suptitle("strider — Molecular Beacon Folding Analysis\n"
+             "(AT-stem vs GC-stem stability comparison)", fontsize=13)
 
-# Arc diagrams (native engine provides pair probabilities)
-arc_diagram(H1, engine=engine_native, ax=axes[0][0], title="H1 arc diagram (pair probs)")
-arc_diagram(H2, engine=engine_native, ax=axes[0][1], title="H2 arc diagram (pair probs)")
+arc_diagram(BEACON_AT, engine=engine_native, ax=axes[0][0],
+            title="BEACON_AT — arc diagram (4-nt AT stem)")
+arc_diagram(BEACON_GC, engine=engine_native, ax=axes[0][1],
+            title="BEACON_GC — arc diagram (4-nt GC stem)")
 
-# Mountain plots
-mountain_plot(H1, engine=engine_native, ax=axes[1][0], title="H1 mountain plot")
-mountain_plot(H2, engine=engine_native, ax=axes[1][1], title="H2 mountain plot")
+mountain_plot(BEACON_AT, engine=engine_native, ax=axes[1][0],
+              title="BEACON_AT — mountain plot")
+mountain_plot(BEACON_GC, engine=engine_native, ax=axes[1][1],
+              title="BEACON_GC — mountain plot")
 
 plt.tight_layout()
-plt.savefig("hairpin_folding.png", dpi=120, bbox_inches="tight")
+fig.savefig(_here / "hairpin_folding.png", dpi=150, bbox_inches="tight")
 print("\nSaved: hairpin_folding.png")
 
-# ── 5. Temperature scan: how structure changes from 20 to 70°C ───────────────
-print("\n── H1 stability across temperatures ────────────────────────")
-print(f"  {'T (°C)':<10} {'ΔG (kcal/mol)':<18} {'Toehold access.'}")
+# ── 5. Temperature scan: stem stability vs temperature ───────────────────────
+# BEACON_GC (stronger stem) is expected to remain folded to higher temperatures.
+print("\n── BEACON_GC stability across temperatures ──────────────────")
+print(f"  {'T (°C)':<10} {'ΔG (kcal/mol)':<18} {'Stem access.'}")
 for celsius in [20, 30, 37, 45, 55, 65]:
     eng_t = ThermoEngine(material="dna", celsius=celsius, sodium=0.137, magnesium=0.01)
     eng_t_nat = ThermoEngine(material="dna", celsius=celsius, sodium=0.137,
                               magnesium=0.01, backend="native")
-    pf  = eng_t.pfunc(H1)
-    acc = eng_t_nat.toehold_accessibility(H1, list(range(6)))
+    pf  = eng_t.pfunc(BEACON_GC)
+    acc = eng_t_nat.toehold_accessibility(BEACON_GC, list(range(4)))
     print(f"  {celsius:<10} {pf.free_energy:<18.2f} {acc:.3f}")
 
 print("\nDone.")

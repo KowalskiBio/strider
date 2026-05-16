@@ -16,6 +16,10 @@ Scoring convention throughout:
 """
 
 import math
+import pathlib
+import matplotlib
+matplotlib.use("Agg")
+matplotlib.rcParams.update({"font.family": "STIXGeneral", "mathtext.fontset": "stix"})
 import matplotlib.pyplot as plt
 import numpy as np
 from strider import ThermoEngine
@@ -23,6 +27,8 @@ from strider.design.objective import DesignObjective
 from strider.design.constraints import HardConstraint
 from strider.design.optimizer import SequenceDesigner, DomainSpec
 from strider.design.mutation import MutationAnalyzer
+
+_here = pathlib.Path(__file__).parent
 
 engine = ThermoEngine(material="dna", celsius=37.0, sodium=0.137, magnesium=0.01)
 
@@ -150,25 +156,25 @@ for name, comp_pen in breakdown.items():
     print(f"    {name:<38} quality = {comp_q:.4f} [{quality_bar(comp_q, 15)}]")
 
 # ── 4. Fixed + free domain co-design ────────────────────────────────────────
-print("\n── Co-design: fix D1 toehold complement, optimise 12-nt stem ─")
-D1_COMP = "TCAACA"   # complement of last 6 nt of miR-21 — kept fixed
+print("\n── Co-design: fix anchor sequence, optimise 12-nt linker ────")
+ANCHOR = "GCATGC"   # generic 6-nt GC anchor — kept fixed
 
 result2 = designer.design(
     domains={
-        "D1_comp": DomainSpec(sequence=D1_COMP),   # fixed
-        "D3":      DomainSpec(length=12),            # free
+        "anchor": DomainSpec(sequence=ANCHOR),   # fixed
+        "linker": DomainSpec(length=12),           # free
     },
-    objective=DesignObjective.gc_content("D3", target_gc=0.5),
+    objective=DesignObjective.gc_content("linker", target_gc=0.5),
     hard_constraints=[c_no_repeats, c_gc],
     n_trials=3,
     max_iterations=200,
     verbose=False,
 )
-d3_gc = gc_pct(result2.sequences["D3"])
-d3_q  = quality(result2.objective_value)
-print(f"  D1_comp (fixed): {result2.sequences['D1_comp']}  (GC = {gc_pct(D1_COMP):.0%})")
-print(f"  D3 (designed):   {result2.sequences['D3']}  "
-      f"(GC = {d3_gc:.0%}, quality = {d3_q:.3f})")
+linker_gc = gc_pct(result2.sequences["linker"])
+linker_q  = quality(result2.objective_value)
+print(f"  anchor (fixed):   {result2.sequences['anchor']}  (GC = {gc_pct(ANCHOR):.0%})")
+print(f"  linker (designed): {result2.sequences['linker']}  "
+      f"(GC = {linker_gc:.0%}, quality = {linker_q:.3f})")
 
 # ── 5. Mutation analysis ─────────────────────────────────────────────────────
 print("\n── Mutation sensitivity of designed toehold ─────────────────")
@@ -229,6 +235,6 @@ cbar = plt.colorbar(im, ax=ax)
 cbar.set_label("Stability (1.0 = neutral, 0.0 = disruptive)")
 
 plt.tight_layout()
-plt.savefig("sequence_design.png", dpi=120, bbox_inches="tight")
+fig.savefig(_here / "sequence_design.png", dpi=150, bbox_inches="tight")
 print("\nSaved: sequence_design.png")
 print("\nDone.")

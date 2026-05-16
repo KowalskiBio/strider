@@ -6,12 +6,16 @@ Covers:
 - DiskCache: persistent sqlite3 memoisation (skip recomputation on re-runs)
 - SweepResult: to_dataframe, optimum, plot
 - 2D grid sweep: toehold length × temperature
-- Signal fraction vs miRNA concentration (dose-response curve)
+- Dose-response curve: signal fraction vs [Target] concentration
 """
 
 import math
 import os
 import time
+import pathlib
+import matplotlib
+matplotlib.use("Agg")
+matplotlib.rcParams.update({"font.family": "STIXGeneral", "mathtext.fontset": "stix", "axes.unicode_minus": False})
 import matplotlib.pyplot as plt
 import numpy as np
 from strider.thermo.engine import ThermoEngine
@@ -19,13 +23,16 @@ from strider.sweep.cache import DiskCache
 from strider.sweep.batch import ParameterSweep
 from strider.kinetics.tmsd import toehold_kf
 
+_here = pathlib.Path(__file__).parent
+
 # ── Setup ────────────────────────────────────────────────────────────────────
 engine = ThermoEngine(material="dna", celsius=37.0, sodium=0.137, magnesium=0.01)
 
-MIR21 = "TAGCTTATCAGACTGATGTTGA"
-H1    = "TCAACATCAGTCTGATACCTCCCTCCTTATCAGACTGA"
-H2    = "TCAGTCTGATAAGGGTGGAGGTATCAGACTGATGTTGATTTTT"
-CP    = "AAAAA"
+# Generic probe/target system (no specific biological target)
+TARGET = "GCATCGATCGATCGATCGCA"    # 20 nt analyte strand
+PROBE  = "CGCGATCGATCGATCGATCGCG"  # 22 nt probe hairpin
+BEACON = "TGCATCGATCGATCGATCGCAT"  # 22 nt beacon strand
+LINKER = "AAAAA"                    # 5-nt poly-A linker
 
 # ── 1. DiskCache: persistent memoisation ────────────────────────────────────
 print("── DiskCache persistent memoisation ─────────────────────────")
@@ -35,9 +42,9 @@ print(f"  Cache entries (start): {cache.stats()['entries']}")
 
 # First call — cache miss
 t0 = time.perf_counter()
-key = DiskCache.make_key("pfunc", "dna", 37.0, H1)
+key = DiskCache.make_key("pfunc", "dna", 37.0, PROBE)
 if cache.get(key) is None:
-    val = engine.pfunc(H1)
+    val = engine.pfunc(PROBE)
     cache.set(key, val)
     print(f"  Cache MISS — computed in {(time.perf_counter()-t0)*1000:.1f} ms  "
           f"(G = {val.free_energy:.2f} kcal/mol)")
@@ -51,24 +58,22 @@ print(f"  Cache HIT  — fetched in {(time.perf_counter()-t0)*1000:.2f} ms")
 print(f"  Cache stats: {cache.stats()}")
 
 # ── 2. Toehold length sweep ──────────────────────────────────────────────────
-print("\n── Toehold sweep: kf and ΔΔG(R1) vs toehold length ─────────")
+print("\n── Toehold sweep: kf and ΔΔG vs toehold length ─────────────")
 
 sweep = ParameterSweep(engine, cache=None, n_workers=1)
 toehold_result = sweep.toehold_sweep(
-    hairpin_seq=H1,
+    hairpin_seq=PROBE,
     toehold_lengths=list(range(3, 13)),
-    target_strand=MIR21,
+    target_strand=TARGET,
 )
 
-# toehold_sweep returns kf values; compute ΔΔG separately for each length
 toehold_lengths = list(toehold_result.axes["toehold_length"])
 kf_values       = list(toehold_result.values)
 ddg_values      = []
 for nt in toehold_lengths:
-    # The toehold is the first `nt` nt of H1 paired with the last `nt` nt of MIR21
-    toehold_H1  = H1[:nt]
-    toehold_mir = MIR21[-nt:]
-    ddg = engine.ddg([toehold_H1, toehold_mir], [[toehold_H1, toehold_mir]])
+    toehold_probe  = PROBE[:nt]
+    toehold_target = TARGET[-nt:]
+    ddg = engine.ddg([toehold_probe, toehold_target], [[toehold_probe, toehold_target]])
     ddg_values.append(ddg)
 
 print(f"  {'Toehold (nt)':<14} {'kf (M⁻¹s⁻¹)':<16} {'ΔΔG (kcal/mol)'}")
@@ -79,22 +84,20 @@ best_nt = toehold_lengths[int(np.argmax(kf_values))]
 print(f"\n  Fastest toehold: {best_nt} nt  (kf = {max(kf_values):.2e} M⁻¹s⁻¹)")
 
 # ── 3. Temperature sweep ──────────────────────────────────────────────────────
-print("\n── Temperature sweep: ΔG(H1), ΔG(H2) vs temperature ────────")
+print("\n── Temperature sweep: ΔG(Probe), ΔG(Beacon) vs temperature ─")
 
 temps = list(range(20, 65, 5))
 temp_result = sweep.temperature_sweep(
-    sequences={"H1": H1, "H2": H2},
+    sequences={"Probe": PROBE, "Beacon": BEACON},
     temperatures=temps,
 )
-# values shape: (2, n_temps) — row 0 = H1, row 1 = H2
 strand_names = temp_result.metadata["strand_names"]
 
-print(f"  {'T (°C)':<10} {'ΔG(H1)':<14} {'ΔG(H2)':<14} {'ΔΔG(H1+H2)'}")
+print(f"  {'T (°C)':<10} {'ΔG(Probe)':<14} {'ΔG(Beacon)':<14} {'ΔΔG(Probe+Beacon)'}")
 for j, T in enumerate(temps):
-    g_h1 = temp_result.values[0, j]
-    g_h2 = temp_result.values[1, j]
-    print(f"  {T:<10} {g_h1:<14.2f} {g_h2:<14.2f} "
-          f"{g_h1+g_h2:.2f}")
+    g_probe  = temp_result.values[0, j]
+    g_beacon = temp_result.values[1, j]
+    print(f"  {T:<10} {g_probe:<14.2f} {g_beacon:<14.2f} {g_probe+g_beacon:.2f}")
 
 # ── 4. 2D grid sweep: kf(toehold, temperature) ──────────────────────────────
 print("\n── 2D grid: kf(toehold length × temperature) ───────────────")
@@ -110,68 +113,67 @@ grid_result = sweep.grid_sweep(
     fn=kf_at,
 )
 
-# optimum() returns params at the minimum value; invert via maximising 1/kf
 inv_grid = sweep.grid_sweep(
     axes={"toehold": list(range(4, 11)), "celsius": [25, 30, 37, 45, 55]},
     fn=lambda p: 1.0 / kf_at(p),
 )
-opt_params = inv_grid.optimum()   # params at minimum of 1/kf = maximum of kf
+opt_params = inv_grid.optimum()
 opt_kf = kf_at(opt_params)
 print(f"  Grid shape: {grid_result.values.shape}  "
       f"(toehold 4–10 nt × temp 25–55°C)")
 print(f"  Maximum kf = {opt_kf:.2e} M⁻¹s⁻¹  at  "
       f"toehold={int(opt_params['toehold'])} nt, T={opt_params['celsius']}°C")
 
-# ── 5. Dose-response: signal fraction vs [miRNA] ─────────────────────────────
-print("\n── Dose-response: predicted signal vs [miRNA] ───────────────")
-# First-order approximation: fraction of H1 opened ≈ 1 − exp(−kf·[miRNA]·t)
-# Valid when [miRNA] << [H1].  For a proper ODE use the mantis bridge (example 07).
-kf_R1         = toehold_kf(6, material="dna", celsius=37.0)
-t_incubation  = 3600  # seconds (1 h)
-H1_conc_nM    = 100.0
+# ── 5. Dose-response: signal fraction vs [Target] ─────────────────────────────
+print("\n── Dose-response: predicted signal vs [Target] ──────────────")
+# First-order approximation: fraction opened ≈ 1 − exp(−kf·[Target]·t)
+# Valid when [Target] << [Probe]. For a proper ODE use the mantis bridge (example 07).
+kf_probe       = toehold_kf(7, material="dna", celsius=37.0)
+t_incubation   = 3600  # seconds (1 h)
+probe_conc_nM  = 100.0
 
-print(f"  kf(R1, 6-nt toehold) = {kf_R1:.2e} M⁻¹s⁻¹")
-print(f"  Incubation = {t_incubation//60} min,  [H1] = {H1_conc_nM:.0f} nM")
-print(f"\n  {'[miR-21] (nM)':<18} {'Signal fraction'}")
-mir_nM_vals = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0]
+print(f"  kf(7-nt toehold) = {kf_probe:.2e} M⁻¹s⁻¹")
+print(f"  Incubation = {t_incubation//60} min,  [Probe] = {probe_conc_nM:.0f} nM")
+print(f"\n  {'[Target] (nM)':<18} {'Signal fraction'}")
+target_nM_vals = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0]
 signal_fracs = []
-for c_nM in mir_nM_vals:
-    frac = min(1.0 - math.exp(-kf_R1 * c_nM * 1e-9 * t_incubation), 1.0)
+for c_nM in target_nM_vals:
+    frac = min(1.0 - math.exp(-kf_probe * c_nM * 1e-9 * t_incubation), 1.0)
     signal_fracs.append(frac)
     print(f"  {c_nM:<18.2f} {frac:.4f}  ({frac*100:.1f}%)")
 
 # ── 6. Visualisation ─────────────────────────────────────────────────────────
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-fig.suptitle("strider — Parameter Sweep & Dose-Response", fontsize=13, fontweight="bold")
+fig.suptitle("strider — Parameter Sweep & Dose-Response", fontsize=13)
 
 # Toehold sweep: ΔΔG and kf (dual-axis)
 ax = axes[0][0]
-color_kf, color_ddg = "#dd4444", "#4466dd"
+color_kf, color_ddg = "#E45756", "#4C78A8"
 ax.semilogy(toehold_lengths, kf_values, "s-", color=color_kf, label="kf (37°C)")
-ax.set_ylabel("kf (M⁻¹s⁻¹)", color=color_kf)
+ax.set_ylabel("$k_f$ (M$^{-1}$s$^{-1}$)", color=color_kf)
 ax.tick_params(axis="y", labelcolor=color_kf)
 ax_ddg = ax.twinx()
-ax_ddg.plot(toehold_lengths, ddg_values, "o--", color=color_ddg, label="ΔΔG(R1)")
+ax_ddg.plot(toehold_lengths, ddg_values, "o--", color=color_ddg, label="ΔΔG")
 ax_ddg.set_ylabel("ΔΔG (kcal/mol)", color=color_ddg)
 ax_ddg.tick_params(axis="y", labelcolor=color_ddg)
-ax.axvline(6, color="gray", linestyle=":", alpha=0.6, label="D1 toehold (6 nt)")
+ax.axvline(7, color="gray", linestyle=":", alpha=0.6, label="7-nt (example)")
 ax.set_xlabel("Toehold length (nt)")
 ax.set_title("Toehold sweep")
 lines = [plt.Line2D([0], [0], color=color_kf, marker="s"),
          plt.Line2D([0], [0], color=color_ddg, linestyle="--", marker="o")]
-ax.legend(lines, ["kf", "ΔΔG"], loc="lower right")
-ax.grid(alpha=0.3)
+ax.legend(lines, ["$k_f$", "ΔΔG"], loc="lower right", framealpha=0.85)
+ax.grid(True, alpha=0.25)
 
-# Temperature sweep: G(H1) and G(H2)
+# Temperature sweep: G(Probe) and G(Beacon)
 ax = axes[0][1]
-ax.plot(temps, temp_result.values[0], "o-", color="#4488cc", label="G(H1)")
-ax.plot(temps, temp_result.values[1], "s-", color="#cc4488", label="G(H2)")
+ax.plot(temps, temp_result.values[0], "o-", color="#4C78A8", label="G(Probe)")
+ax.plot(temps, temp_result.values[1], "s-", color="#B279A2", label="G(Beacon)")
 ax.axvline(37, color="gray", linestyle=":", alpha=0.6, label="37°C (body)")
 ax.set_xlabel("Temperature (°C)")
 ax.set_ylabel("ΔG (kcal/mol)")
-ax.set_title("Temperature sweep: hairpin stability")
-ax.legend()
-ax.grid(alpha=0.3)
+ax.set_title("Temperature sweep: probe stability")
+ax.legend(framealpha=0.85)
+ax.grid(True, alpha=0.25)
 
 # 2D heatmap: log10(kf)
 ax = axes[1][0]
@@ -187,23 +189,23 @@ im = ax.imshow(
 )
 ax.set_xlabel("Toehold length (nt)")
 ax.set_ylabel("Temperature (°C)")
-ax.set_title("log₁₀(kf) heat map")
-plt.colorbar(im, ax=ax, label="log₁₀(kf [M⁻¹s⁻¹])")
+ax.set_title("log$_{10}$($k_f$) heat map")
+plt.colorbar(im, ax=ax, label="log$_{10}$($k_f$ [M$^{-1}$s$^{-1}$])")
 
 # Dose-response
 ax = axes[1][1]
-ax.semilogx([c * 1e-9 for c in mir_nM_vals], signal_fracs,
-            "o-", color="#44aa55", linewidth=2, markersize=7)
+ax.semilogx([c * 1e-9 for c in target_nM_vals], signal_fracs,
+            "o-", color="#54A24B", linewidth=2, markersize=7)
 ax.axhline(0.5, color="gray", linestyle="--", alpha=0.5, label="50% signal")
-ax.set_xlabel("[miR-21] (M)")
+ax.set_xlabel("[Target] (M)")
 ax.set_ylabel("Predicted signal fraction")
-ax.set_title(f"Dose-response (t = {t_incubation//60} min, 6-nt toehold)")
-ax.legend()
+ax.set_title(f"Dose-response (t = {t_incubation//60} min, 7-nt toehold)")
+ax.legend(framealpha=0.85)
 ax.set_ylim(-0.05, 1.05)
-ax.grid(alpha=0.3)
+ax.grid(True, alpha=0.25)
 
 plt.tight_layout()
-plt.savefig("parameter_sweep.png", dpi=120, bbox_inches="tight")
+fig.savefig(_here / "parameter_sweep.png", dpi=150, bbox_inches="tight")
 print("\nSaved: parameter_sweep.png")
 
 if os.path.exists(CACHE_PATH):
