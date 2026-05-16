@@ -1,107 +1,28 @@
 site_name: strider-dna
-site_description: Nucleic acid thermodynamics, kinetics, and circuit design — pure-Python, no restrictive licenses
-site_author: Emilio Venegas
 site_url: https://emiliovenegas.github.io/strider
 repo_url: https://github.com/EmilioVenegas/strider
 repo_name: EmilioVenegas/strider
-copyright: Copyright &copy; 2026 Emilio Venegas
 
 theme:
   name: material
   palette:
-    - scheme: default
-      primary: teal
-      accent: cyan
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-    - scheme: slate
-      primary: teal
-      accent: cyan
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+    primary: teal
+    accent: cyan
   features:
-    - navigation.tabs
-    - navigation.tabs.sticky
     - navigation.sections
-    - navigation.expand
     - navigation.top
-    - search.highlight
-    - search.suggest
-    - content.code.copy
-    - content.code.annotate
 
 plugins:
   - search
   - mkdocstrings:
       handlers:
         python:
+          paths: [.]
           options:
-            docstring_style: google
             show_source: true
             show_root_heading: true
-            show_root_full_path: false
-            show_symbol_type_heading: true
-            show_symbol_type_toc: true
-            members_order: source
-            separate_signature: true
-            show_signature_annotations: true
-            unwrap_annotated: true
-            merge_init_into_class: true
-            inherited_members: false
-            filters:
-              - "!^_"
-              - "^__init__"
-              - "^__repr__"
-              - "^__str__"
-
-markdown_extensions:
-  - admonition
-  - pymdownx.details
-  - pymdownx.superfences
-  - pymdownx.highlight:
-      anchor_linenums: true
-      line_spans: __span
-      pygments_lang_class: true
-  - pymdownx.inlinehilite
-  - pymdownx.snippets
-  - pymdownx.tabbed:
-      alternate_style: true
-  - tables
-  - toc:
-      permalink: true
-  - attr_list
-  - md_in_html
+            heading_level: 2
 
 nav:
   - Home: index.md
-  - Installation: installation.md
-  - User Guide:
-      - Thermodynamics: guide/thermodynamics.md
-      - Structure Prediction: guide/structure.md
-      - Kinetics: guide/kinetics.md
-      - Sequence Design: guide/design.md
-      - Off-Target Screening: guide/screening.md
-      - CHA & mantis Bridge: guide/bridge.md
-      - Parameter Sweeps: guide/sweeps.md
-      - Export Formats: guide/export.md
-  - API Reference:
-      - ThermoEngine: api/thermo.md
-      - Structure: api/structure.md
-      - Kinetics: api/kinetics.md
-      - Design: api/design.md
-      - Bridge: api/bridge.md
-      - Sweep: api/sweep.md
-      - Screen: api/screen.md
-      - Export: api/export.md
-  - Examples: examples.md
-  - Background & Theory: theory.md
-  - Changelog: changelog.md
-
-extra:
-  social:
-    - icon: fontawesome/brands/github
-      link: https://github.com/EmilioVenegas/strider
-    - icon: fontawesome/brands/python
-      link: https://pypi.org/project/strider-dna
+  - API Reference: api.md
