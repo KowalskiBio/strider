@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strider-dna"
+version = "0.1.0"
+description = "Nucleic acid thermodynamics, TMSD kinetics, and sequence design — the biophysics layer below mantis-delta"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Emilio Venegas", email = "emiliovenegas10@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.6",
+]
+
+[project.optional-dependencies]
+vienna   = ["ViennaRNA>=2.6"]
+parallel = ["joblib>=1.3"]
+pandas   = ["pandas>=2.0"]
+mantis   = ["mantis-delta>=0.1"]
+full     = ["ViennaRNA>=2.6", "joblib>=1.3", "pandas>=2.0", "mantis-delta>=0.1"]
+dev      = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
+
+[project.urls]
+Homepage   = "https://github.com/EmilioVenegas/strider"
+Repository = "https://github.com/EmilioVenegas/strider"
+Issues     = "https://github.com/EmilioVenegas/strider/issues"
+
+[tool.setuptools.packages.find]
+include = ["strider*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
