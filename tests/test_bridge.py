@@ -76,3 +76,63 @@ class TestRatesToCRNetwork:
         assert rn is not None
         assert "H1" in rn.species
         assert "H2" in rn.species
+
+
+class TestCircuitBridge:
+    """Generic strider→mantis bridge for arbitrary reaction topologies."""
+
+    @pytest.fixture
+    def bridge(self):
+        from strider import CircuitBridge
+        return CircuitBridge(
+            reactions=["A + B <-> AB", "AB + C <-> ABC"],
+            sequences={
+                "A": "GCGCGCAAAA",
+                "B": "TTTTGCGCGC",
+                "C": "AAGGCCTTAA",
+            },
+        )
+
+    def test_ddg_table_resolves_complex_sequences(self, bridge):
+        ddg = bridge.ddg_table
+        # Both reactions should have resolved ΔΔG (complex sequences derived
+        # from constituents via the _resolve_sequence helper).
+        assert len(ddg) == 2
+        for rxn, val in ddg.items():
+            assert isinstance(val, float)
+
+    def test_rates_dict_complete_and_positive(self, bridge):
+        rates = bridge.rates
+        assert len(rates) == 4  # 2 reversible reactions = 4 rate constants
+        for k, v in rates.items():
+            assert v > 0, f"{k} not positive: {v}"
+
+    def test_to_crnetwork(self, bridge):
+        rn = bridge.to_crnetwork()
+        assert rn is not None
+        assert rn.n_reactions == 4
+        for sp in ("A", "B", "C", "AB", "ABC"):
+            assert sp in rn.species
+
+    def test_caches_ddg_table(self, bridge):
+        first = bridge.ddg_table
+        second = bridge.ddg_table
+        assert first is second  # cached object identity
+
+    def test_simulate_runs(self, bridge):
+        ic = {"A": 1e-7, "B": 1e-7, "C": 1e-7, "AB": 0.0, "ABC": 0.0}
+        result = bridge.simulate(ic, (0.0, 600.0))
+        assert result.success
+        assert "ABC" in result.concentrations
+
+    def test_unknown_complex_falls_back_to_default_ddg(self):
+        from strider import CircuitBridge
+        # 'X' is not in sequences and not derivable — ddg_table skips that rxn,
+        # rates fall back to a -5 kcal/mol default rather than crashing.
+        bridge = CircuitBridge(
+            reactions=["A + X <-> AX"],
+            sequences={"A": "GCGCGCAAAA"},
+        )
+        assert bridge.ddg_table == {}  # nothing resolvable
+        rates = bridge.rates
+        assert all(v > 0 for v in rates.values())

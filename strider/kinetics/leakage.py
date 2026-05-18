@@ -33,6 +33,10 @@ class SpuriousReaction:
     def __repr__(self) -> str:
         return f"SpuriousReaction({self.mantis_string}, ΔΔG={self.ddg:.2f})"
 
+    def product_complex_name(self) -> str:
+        """Underscore-joined name of the product complex (e.g. 'H1_H2')."""
+        return "_".join(self.product_complex)
+
 
 @dataclass
 class LeakageReport:

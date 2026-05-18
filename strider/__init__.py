@@ -58,12 +58,19 @@ from strider.design.mutation import MutationAnalyzer, MutationProfile
 
 from strider.screen.offtarget import OffTargetScreener, ScreeningReport
 
-from strider.bridge.mantis_bridge import CHABridge, CHAVerificationReport, rates_to_crnetwork
+from strider.bridge.mantis_bridge import (
+    CHABridge, CHAVerificationReport, CircuitBridge, rates_to_crnetwork,
+)
 
 from strider.sweep.cache import DiskCache
 from strider.sweep.batch import ParameterSweep, SweepResult
 
 from strider.export.formats import to_vienna, to_ct, to_bpseq, to_fasta, to_oxdna, write
+
+from strider.equilibrium import (
+    solve_equilibrium, equilibrium_from_engine, EquilibriumResult,
+    cyclic_symmetry, water_molarity,
+)
 
 __version__ = "0.1.0"
 __author__ = "Emilio Venegas"
@@ -92,9 +99,12 @@ __all__ = [
     # Screening
     "OffTargetScreener", "ScreeningReport",
     # Bridge to mantis
-    "CHABridge", "CHAVerificationReport", "rates_to_crnetwork",
+    "CHABridge", "CHAVerificationReport", "CircuitBridge", "rates_to_crnetwork",
     # Sweep & cache
     "DiskCache", "ParameterSweep", "SweepResult",
+    # Equilibrium
+    "solve_equilibrium", "equilibrium_from_engine", "EquilibriumResult",
+    "cyclic_symmetry", "water_molarity",
     # Export
     "to_vienna", "to_ct", "to_bpseq", "to_fasta", "to_oxdna", "write",
 ]

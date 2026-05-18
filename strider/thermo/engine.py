@@ -132,6 +132,55 @@ class ThermoEngine:
             self.cache.set(key, result)
         return result
 
+    def pairs(self, *sequences: str) -> np.ndarray:
+        """Pair-probability matrix P[i,j] for the given (multi-)strand complex."""
+        return self.pfunc(*sequences).pair_probs
+
+    def ensemble_defect(
+        self,
+        sequences: str | tuple[str, ...],
+        target_structure: str,
+        normalize: bool = True,
+    ) -> float:
+        """
+        Ensemble defect of a target dot-bracket structure for the given complex.
+
+        Defect = Σ_i (1 − P_correct(i)), where
+          - if position i is unpaired in the target, P_correct(i) = 1 − Σ_j P(i,j)
+          - if position i pairs with j in the target, P_correct(i) = P(i,j)
+
+        If ``normalize`` is True (default), the defect is divided by sequence
+        length so the value lies in [0, 1].
+        """
+        from strider.structure.dot_bracket import parse_pairs
+        if isinstance(sequences, str):
+            seqs = (sequences,)
+        else:
+            seqs = tuple(sequences)
+        clean_target = target_structure.replace("&", "").replace("+", "")
+        n = sum(len(s) for s in seqs)
+        if len(clean_target) != n:
+            raise ValueError(
+                f"target structure length {len(clean_target)} != total sequence length {n}"
+            )
+
+        probs = self.pairs(*seqs)
+        target_pairs = dict()
+        for i, j in parse_pairs(target_structure):
+            target_pairs[i] = j
+            target_pairs[j] = i
+
+        defect = 0.0
+        for i in range(n):
+            if i in target_pairs:
+                j = target_pairs[i]
+                p_correct = float(probs[i][j])
+            else:
+                p_correct = 1.0 - float(probs[i].sum())
+            defect += max(0.0, 1.0 - p_correct)
+
+        return defect / n if normalize else defect
+
     def duplex_dg(self, seq1: str, seq2: str | None = None) -> float:
         """
         ΔG (kcal/mol) of hybridization.
@@ -251,10 +300,8 @@ class ThermoEngine:
             # Multi-strand: nick-aware McCaskill DP on concatenated sequence.
             # Returns ensemble ΔG of the complex (not the binding ΔG).
             # engine.ddg() subtracts individual strand energies to get ΔΔG.
-            from strider.thermo.ensemble import _multistrand_dg
-            dG = _multistrand_dg(list(sequences), self.celsius, self.material)
-            n = sum(len(s) for s in sequences)
-            probs = np.zeros((n, n))
+            from strider.thermo.ensemble import multistrand_pairs
+            dG, probs = multistrand_pairs(list(sequences), self.celsius, self.material)
 
         Z = math.exp(-dG / (R * (self.celsius + 273.15)))
         return PFuncResult(free_energy=dG, partition_function=Z, pair_probs=probs)
@@ -316,12 +363,34 @@ class ThermoEngine:
         return MFEResult(energy=0.0, structure="." * sum(len(s) for s in sequences))
 
     def _pfunc_nupack(self, sequences: tuple[str, ...]) -> PFuncResult:
-        """Partition function via NUPACK nupack.pfunc()."""
+        """
+        Partition function via NUPACK ``nupack.pfunc()``, with pair probabilities
+        via ``nupack.pairs()``.
+
+        NUPACK reports ΔG at a water-molarity standard state.  We shift to a
+        1 M reference (the convention used by strider's native backend and by
+        SantaLucia / Turner nearest-neighbor parameters) so that engine.ddg(),
+        equilibrium solvers, and detailed-balance kinetics all see consistent
+        units regardless of the backend.
+        """
         import nupack
+        from strider.equilibrium import water_molarity
         model = self._nupack_model()
         pf, dG = nupack.pfunc(list(sequences), model)
-        n = sum(len(s) for s in sequences)
-        return PFuncResult(free_energy=float(dG), partition_function=float(pf), pair_probs=np.zeros((n, n)))
+
+        # Standard-state conversion: ΔG_1M = ΔG_c0 + (N − 1) · RT · ln(c0)
+        n_strands = len(sequences)
+        if n_strands > 1:
+            c0 = water_molarity(self.celsius)
+            dG = float(dG) + (n_strands - 1) * R * (self.celsius + 273.15) * math.log(c0)
+
+        try:
+            pm = nupack.pairs(list(sequences), model)
+            probs = np.asarray(pm.to_array()) if hasattr(pm, "to_array") else np.asarray(pm)
+        except Exception:
+            n = sum(len(s) for s in sequences)
+            probs = np.zeros((n, n))
+        return PFuncResult(free_energy=float(dG), partition_function=float(pf), pair_probs=probs)
 
     def _nupack_model(self):
         """Build a nupack.Model from the engine's material/temperature/salt settings."""

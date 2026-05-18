@@ -12,6 +12,7 @@ build/
 develop-eggs/
 dist/
 downloads/
+scratch/
 eggs/
 .eggs/
 lib/
@@ -79,3 +80,6 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 site/
+
+# Datasets
+data/

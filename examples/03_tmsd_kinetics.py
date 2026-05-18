@@ -127,9 +127,9 @@ g_stems = np.linspace(0, 15, 100)
 k_leaks = [leakage_kf(g, kf_max=1e6, celsius=37.0) for g in g_stems]
 ax = axes[2]
 ax.semilogy(g_stems, k_leaks, "-", color="#B279A2", linewidth=2)
-ax.axvline(8.0, color="gray", linestyle="--", alpha=0.5, label="|ΔG| = 8 kcal/mol")
-ax.axhline(1e3, color="#FF9800", linestyle=":", alpha=0.7, label="10$^3$ M$^{-1}$s$^{-1}$ threshold")
-ax.set_xlabel("|ΔG_stem| (kcal/mol)")
+ax.axvline(8.0, color="gray", linestyle="--", alpha=0.5, label=r"$|\Delta G| = 8$ kcal/mol")
+ax.axhline(1e3, color="#FF9800", linestyle=":", alpha=0.7, label=r"$10^3$ M$^{-1}$s$^{-1}$ threshold")
+ax.set_xlabel(r"$|\Delta G_{\mathrm{stem}}|$ (kcal/mol)")
 ax.set_ylabel("$k_{leak}$ (M$^{-1}$s$^{-1}$)")
 ax.set_title("Leakage rate vs stem stability")
 ax.legend(framealpha=0.85)

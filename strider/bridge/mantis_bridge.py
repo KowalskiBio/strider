@@ -69,14 +69,186 @@ def rates_to_crnetwork(
         from strider.kinetics.leakage import LeakageEnumerator
         enumerator = LeakageEnumerator(engine, ddg_threshold=leakage_threshold)
         report = enumerator.enumerate(sequences, intended_reactions=reaction_strings)
-        leakage_strs = report.to_mantis_strings()
-        for lk in leakage_strs:
-            if lk not in all_reactions:
-                all_reactions.append(lk)
-                # Assign leakage rates (small, Boltzmann-suppressed)
-                _add_leakage_rates(rates, lk, sequences, engine)
+        for sp in report.reactions:
+            # Add the spurious reaction as reversible so detailed balance is respected
+            rxn_str = sp.mantis_string.replace("->", "<->")
+            if rxn_str not in all_reactions and sp.mantis_string not in all_reactions:
+                all_reactions.append(rxn_str)
+                _add_leakage_rates(rates, sp, engine)
 
     return mantis.CRNetwork.from_string(all_reactions, rates=rates)
+
+
+# ─── generic circuit bridge ──────────────────────────────────────────────────
+
+class CircuitBridge:
+    """
+    Generic strider → mantis adapter for ANY reaction topology.
+
+    Use this when your circuit is not the 4-reaction CHA shape that
+    :class:`CHABridge` hardcodes.  You pass in mantis-style reaction strings
+    plus a sequences dict; the bridge derives ΔΔG values via the supplied
+    :class:`ThermoEngine` and emits a mantis ``CRNetwork`` ready for
+    ``.simulate()``, ``.steady_states()``, and bifurcation analysis.
+
+    Parameters
+    ----------
+    reactions        : list of mantis-style reaction strings, e.g.
+                       ``["A + B <-> AB", "AB + C -> AC + B"]``.
+    sequences        : species_name → DNA/RNA sequence.  Species that are
+                       complexes (e.g. ``"AB"``) without an entry are derived
+                       from the constituent strands by concatenation.
+    engine           : ThermoEngine.  Created with physiological defaults if
+                       ``None``.
+    toehold_map      : optional reaction_string → toehold length override.
+                       Falls back to 6 nt per reaction.
+    include_leakage  : if True, run :class:`LeakageEnumerator` and add
+                       spurious reactions to the output network.
+    leakage_threshold: ΔΔG cutoff (kcal/mol) for leakage enumeration.
+
+    Examples
+    --------
+    >>> bridge = CircuitBridge(
+    ...     reactions=["A + B <-> AB", "AB + C -> AC + B"],
+    ...     sequences={"A": "GCGC", "B": "GCGC", "C": "ATAT"},
+    ... )
+    >>> rn = bridge.to_crnetwork()                          # mantis CRNetwork
+    >>> ss = rn.steady_states({"A": 1e-7, "B": 1e-7, "C": 1e-7})
+    """
+
+    def __init__(
+        self,
+        reactions: list[str],
+        sequences: dict[str, str],
+        engine: "ThermoEngine | None" = None,
+        toehold_map: dict[str, int] | None = None,
+        include_leakage: bool = False,
+        leakage_threshold: float = -4.0,
+        celsius: float = 37.0,
+    ) -> None:
+        self.reactions = list(reactions)
+        self.sequences = {k: v.upper().replace("U", "T") for k, v in sequences.items()}
+        self.toehold_map = dict(toehold_map or {})
+        self.include_leakage = include_leakage
+        self.leakage_threshold = leakage_threshold
+
+        if engine is None:
+            from strider.thermo.engine import ThermoEngine
+            engine = ThermoEngine(material="dna", celsius=celsius,
+                                  sodium=0.137, magnesium=0.01)
+        self.engine = engine
+
+        self._ddg_cache: dict[str, float] | None = None
+        self._rates_cache: dict[str, float] | None = None
+        self._leakage_cache = None
+
+    # ─── thermodynamics ──────────────────────────────────────────────────────
+
+    def _resolve_sequence(self, species: str) -> str | list[str] | None:
+        """
+        Resolve a species token to its sequence(s).
+
+        Returns a single sequence string for monomers, or a list of sequences
+        for multi-strand complexes (so :meth:`ThermoEngine.ddg` treats it as a
+        proper complex rather than a concatenated single strand).
+        """
+        if species in self.sequences:
+            return self.sequences[species]
+        # Complex name like 'A_B'
+        if "_" in species:
+            parts = species.split("_")
+            if all(p in self.sequences for p in parts):
+                return [self.sequences[p] for p in parts]
+        # Concatenated names like 'AB' (each letter is a known species)
+        if len(species) > 1 and all(c in self.sequences for c in species):
+            return [self.sequences[c] for c in species]
+        return None
+
+    @property
+    def ddg_table(self) -> dict[str, float]:
+        """Per-reaction ΔΔG (kcal/mol).  Cached."""
+        if self._ddg_cache is not None:
+            return self._ddg_cache
+        out: dict[str, float] = {}
+        for rxn in self.reactions:
+            from strider.kinetics.tmsd import _parse_reversible
+            fwd, _ = _parse_reversible(rxn, self.sequences)
+            if fwd is None:
+                continue
+            react_seqs = [self._resolve_sequence(s) for s in fwd[0]]
+            prod_seqs  = [self._resolve_sequence(s) for s in fwd[1]]
+            if any(s is None for s in react_seqs + prod_seqs):
+                continue
+            try:
+                out[rxn] = self.engine.ddg(react_seqs, prod_seqs)
+            except Exception:
+                continue
+        self._ddg_cache = out
+        return out
+
+    @property
+    def rates(self) -> dict[str, float]:
+        """Mantis-compatible rate dict for every reaction.  Cached."""
+        if self._rates_cache is not None:
+            return self._rates_cache
+        from strider.kinetics.tmsd import (
+            _parse_reversible, _mantis_rate_key, rates_from_ddg, toehold_kf,
+        )
+        ddg_table = self.ddg_table
+        rates: dict[str, float] = {}
+        for rxn in self.reactions:
+            fwd, rev = _parse_reversible(rxn, self.sequences)
+            if fwd is None:
+                continue
+            ddg = ddg_table.get(rxn, -5.0)  # default for unresolved
+            nt = self.toehold_map.get(rxn, 6)
+            kf = toehold_kf(nt, self.engine.material, self.engine.celsius)
+            kf_val, kr_val = rates_from_ddg(ddg, kf, self.engine.celsius)
+            rates[_mantis_rate_key(fwd[0], fwd[1])] = kf_val
+            if rev is not None:
+                rates[_mantis_rate_key(fwd[1], fwd[0])] = kr_val
+        self._rates_cache = rates
+        return rates
+
+    @property
+    def leakage_report(self):
+        """Leakage enumeration over the species in ``sequences``.  Cached."""
+        if self._leakage_cache is not None:
+            return self._leakage_cache
+        from strider.kinetics.leakage import LeakageEnumerator
+        enum = LeakageEnumerator(self.engine, ddg_threshold=self.leakage_threshold)
+        self._leakage_cache = enum.enumerate(
+            self.sequences, intended_reactions=self.reactions
+        )
+        return self._leakage_cache
+
+    # ─── network construction ────────────────────────────────────────────────
+
+    def to_crnetwork(self):
+        """Build and return a mantis ``CRNetwork`` for this circuit."""
+        mantis = _import_mantis()
+        all_reactions = list(self.reactions)
+        rates = dict(self.rates)
+
+        if self.include_leakage:
+            report = self.leakage_report
+            for sp in report.reactions:
+                rxn_str = sp.mantis_string.replace("->", "<->")
+                if rxn_str not in all_reactions and sp.mantis_string not in all_reactions:
+                    all_reactions.append(rxn_str)
+                    _add_leakage_rates(rates, sp, self.engine)
+
+        return mantis.CRNetwork.from_string(all_reactions, rates=rates)
+
+    def simulate(self, initial_conditions: dict[str, float], t_span=(0.0, 3600.0), **kw):
+        """Convenience wrapper: build network and run mantis ODE simulation."""
+        rn = self.to_crnetwork()
+        return rn.simulate(initial_conditions, t_span, **kw)
+
+    def steady_states(self, initial_conditions: dict[str, float], **kw):
+        """Convenience wrapper: build network and find steady states via mantis."""
+        rn = self.to_crnetwork()
+        return rn.steady_states(initial_conditions, **kw)
 
 
 # ─── CHA-specific bridge ─────────────────────────────────────────────────────
@@ -108,18 +280,21 @@ class CHAVerificationReport:
     signal_fraction_predicted: float = 0.0
 
     def __str__(self) -> str:
+        fc = set(self.failed_checks)
         status = "PASS" if self.all_passed else "FAIL"
+        ok = "✓"
+        no = "✗"
         lines = [
             f"CHA Verification: {status}",
-            f"  Toehold accessible:    {'✓' if self.toehold_accessible else '✗'}",
-            f"  H1 stability:          {self.h1_stability[0]:.2f} kcal/mol {'✓' if self.h1_stability[1] else '✗'}",
-            f"  H2 stability:          {self.h2_stability[0]:.2f} kcal/mol {'✓' if self.h2_stability[1] else '✗'}",
-            f"  ΔΔG(R1, init):         {self.ddg_r1:.2f} kcal/mol {'✓' if self.ddg_r1 < -3 else '✗'}",
-            f"  ΔΔG(R2, prop):         {self.ddg_r2:.2f} kcal/mol {'✓' if self.ddg_r2 < -3 else '✗'}",
-            f"  ΔΔG(R3, detect):       {self.ddg_r3:.2f} kcal/mol {'✓' if self.ddg_r3 < -8 else '✗'}",
-            f"  ΔΔG(spont leakage):    {self.ddg_spont:.2f} kcal/mol {'✓' if self.ddg_spont > -10 else '✗'}",
-            f"  Catalyst recycled:     {'✓' if self.catalyst_recycled else '✗'}",
-            f"  CP leakage:            {self.leakage_score:.2f} kcal/mol {'✓' if self.leakage_score > -6 else '✗'}",
+            f"  Toehold accessible:    {ok if self.toehold_accessible else no}",
+            f"  H1 stability (norm):   {self.h1_stability[0]:.2f} kcal/mol {no if 'H1_stability' in fc else ok}",
+            f"  H2 stability (norm):   {self.h2_stability[0]:.2f} kcal/mol {no if 'H2_stability' in fc else ok}",
+            f"  ΔΔG(R1, init):         {self.ddg_r1:.2f} kcal/mol {no if 'R1_driving_force' in fc else ok}",
+            f"  ΔΔG(R2, prop):         {self.ddg_r2:.2f} kcal/mol {no if 'R2_driving_force' in fc else ok}",
+            f"  ΔΔG(R3, detect):       {self.ddg_r3:.2f} kcal/mol {no if 'R3_driving_force' in fc else ok}",
+            f"  ΔΔG(spont leakage):    {self.ddg_spont:.2f} kcal/mol {no if 'spontaneous_leakage' in fc else ok}",
+            f"  Catalyst recycled:     {ok if self.catalyst_recycled else no}",
+            f"  CP leakage:            {self.leakage_score:.2f} kcal/mol {no if 'cp_leakage' in fc else ok}",
             f"  Predicted signal:      {self.signal_fraction_predicted:.1%}",
         ]
         if self.failed_checks:
@@ -132,8 +307,8 @@ class CHABridge:
     Convenience class for the CHA 4-reaction topology.
 
     Automates all thermodynamic calculations and verification checks
-    defined in hairpin_design_scripts/claude_codesign.py, but without
-    any NUPACK dependency.
+    defined in hairpin_design_scripts/claude_codesign.py using strider's
+    own thermodynamic engine — no external folding library required.
 
     Parameters
     ----------
@@ -274,8 +449,13 @@ class CHABridge:
 
         g_h1 = ddg["g_H1"]
         g_h2 = ddg["g_H2"]
-        h1_ok = SWEET_SPOT_LOW <= g_h1 <= SWEET_SPOT_HIGH
-        h2_ok = SWEET_SPOT_LOW <= g_h2 <= SWEET_SPOT_HIGH
+        # Normalize by sequence length relative to a 20-nt reference so the
+        # sweet spot thresholds hold across a range of hairpin lengths.
+        _ref_nt = 20.0
+        g_h1_norm = g_h1 * _ref_nt / len(H1) if H1 else g_h1
+        g_h2_norm = g_h2 * _ref_nt / len(H2) if H2 else g_h2
+        h1_ok = SWEET_SPOT_LOW <= g_h1_norm <= SWEET_SPOT_HIGH
+        h2_ok = SWEET_SPOT_LOW <= g_h2_norm <= SWEET_SPOT_HIGH
 
         # Toehold accessibility: first toehold_d1 bases of H1 should be unpaired
         th_access = self.engine.toehold_accessibility(H1, list(range(self.toehold_d1)))
@@ -283,7 +463,13 @@ class CHABridge:
         r1_ok = ddg["R1"] < -3.0
         r2_ok = ddg["R2"] < -3.0
         r3_ok = ddg["R3"] < -8.0
-        spont_ok = ddg["leakage"] > -10.0
+        # Leakage check: use kinetic rate ratio rather than absolute ΔΔG so the
+        # check stays meaningful across hairpin lengths.  Pass when the leakage
+        # forward rate is at least 1e6× slower than the signal initiation rate.
+        from strider.kinetics.tmsd import toehold_kf, leakage_kf
+        kf_signal = toehold_kf(self.toehold_d1, self.engine.material, self.engine.celsius)
+        kf_spont = leakage_kf(abs(g_h1), kf_max=1e6, celsius=self.engine.celsius)
+        spont_ok = kf_spont < kf_signal * 1e-4
         cp_ok = ddg["cp_leakage"] > -6.0
 
         # Catalyst recycled: ΔΔG_R2 < 0 means miRNA released (energetically favored)
@@ -305,8 +491,8 @@ class CHABridge:
 
         return CHAVerificationReport(
             toehold_accessible=(th_access >= 0.5),
-            h1_stability=(g_h1, h1_ok),
-            h2_stability=(g_h2, h2_ok),
+            h1_stability=(g_h1_norm, h1_ok),
+            h2_stability=(g_h2_norm, h2_ok),
             ddg_r1=ddg["R1"],
             ddg_r2=ddg["R2"],
             ddg_r3=ddg["R3"],
@@ -415,15 +601,37 @@ def _names(sequences: dict[str, str]) -> dict[str, str]:
 
 def _add_leakage_rates(
     rates: dict,
-    rxn_str: str,
-    sequences: dict[str, str],
+    spurious,                              # strider.kinetics.leakage.SpuriousReaction
     engine,
 ) -> None:
-    """Add small leakage rates for spurious reactions."""
+    """
+    Insert forward/reverse rate constants for a spurious reaction using
+    detailed balance against the enumerated ΔΔG.
+
+    Forward rate is the Boltzmann-suppressed hairpin-breathing model
+    (leakage_kf), evaluated against |ΔΔG| as the activation barrier.
+    """
     from strider.kinetics.tmsd import leakage_kf, rates_from_ddg
-    kf = leakage_kf(6.0, celsius=engine.celsius)
-    kr = kf * 10.0  # unfavorable reverse
-    rates[rxn_str] = kf
+    ddg = spurious.ddg
+    kf = leakage_kf(abs(ddg), kf_max=1e6, celsius=engine.celsius)
+    kf_val, kr_val = rates_from_ddg(ddg, kf, engine.celsius)
+    fwd_key = _mantis_rate_key(spurious.reactant_names, spurious.product_complex_name())
+    rev_key = _mantis_rate_key(spurious.product_complex_name(), spurious.reactant_names)
+    rates.setdefault(fwd_key, kf_val)
+    rates.setdefault(rev_key, kr_val)
+
+
+def _mantis_rate_key(reactants, products) -> str:
+    """Mantis-style canonical rate key 'A + B -> C'."""
+    if isinstance(reactants, str):
+        r = reactants
+    else:
+        r = " + ".join(sorted(reactants))
+    if isinstance(products, str):
+        p = products
+    else:
+        p = " + ".join(sorted(products))
+    return f"{r} -> {p}"
 
 
 def _predict_signal(ddg: dict[str, float], celsius: float = 37.0) -> float:

@@ -54,6 +54,33 @@ class TestDesignObjective:
         assert "gc2" in breakdown
 
 
+class TestEnsembleDefect:
+    def test_defect_in_unit_interval(self, engine):
+        seq = "GCGCAAAAGCGC"
+        target = "((((....))))"
+        d = engine.ensemble_defect(seq, target)
+        assert 0.0 <= d <= 1.0
+
+    def test_hairpin_target_beats_random_for_stable_seq(self, engine):
+        # A GC-rich palindrome should match the hairpin target better
+        # than an unstructured (all-unpaired) target.
+        seq = "GCGCGCAAAAGCGCGC"
+        good = engine.ensemble_defect(seq, "((((((....))))))")
+        bad = engine.ensemble_defect(seq, "................")
+        assert good < bad
+
+    def test_length_mismatch_raises(self, engine):
+        with pytest.raises(ValueError):
+            engine.ensemble_defect("ACGT", "(.)")
+
+    def test_objective_factory(self, engine):
+        obj = DesignObjective.ensemble_defect(
+            engine, "H", "((((....))))", weight=1.0
+        )
+        score = obj({"H": "GCGCAAAAGCGC"})
+        assert 0.0 <= score <= 1.0
+
+
 class TestHardConstraint:
     def test_no_repeats(self):
         c = HardConstraint.no_repeats(["CCCC", "AAAA"])

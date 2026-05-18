@@ -206,6 +206,44 @@ class DesignObjective:
         return obj
 
     @classmethod
+    def ensemble_defect(
+        cls,
+        engine: "ThermoEngine",
+        strand_names: str | list[str],
+        target_structure: str,
+        weight: float = 1.0,
+        normalize: bool = True,
+        label: str | None = None,
+    ) -> "DesignObjective":
+        """
+        Penalize the NUPACK-style ensemble defect of a target dot-bracket.
+
+        ``strand_names`` is either a single domain name or a list of names whose
+        sequences are concatenated (in order) to form the complex.  The target
+        structure must match the total length and may use ``&``/``+`` separators
+        for readability (they are stripped before scoring).
+        """
+        names = [strand_names] if isinstance(strand_names, str) else list(strand_names)
+        lbl = label or f"ensemble_defect({'+'.join(names)})"
+
+        def fn(seqs: dict[str, str]) -> float:
+            try:
+                strands = tuple(seqs[n] for n in names if n in seqs)
+            except KeyError:
+                return 0.0
+            if not strands or sum(len(s) for s in strands) == 0:
+                return 0.0
+            try:
+                return engine.ensemble_defect(strands, target_structure, normalize=normalize)
+            except ValueError:
+                return float("inf")
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [lbl]
+        return obj
+
+    @classmethod
     def from_callable(
         cls,
         fn: Callable[[dict[str, str]], float],
