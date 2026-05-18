@@ -57,6 +57,26 @@ def na_correction_dg(seq: str, sodium_M: float, celsius: float = 37.0) -> float:
     return -dG_correction  # stabilizing when [Na+] > 1M
 
 
+def dg_per_bp_salt(sodium_M: float, magnesium_M: float = 0.0) -> float:
+    """
+    Per-base-pair ΔG salt correction (kcal/mol) relative to 1 M NaCl, 0 Mg²⁺.
+
+    Empirical fit to NUPACK's pfunc over Na⁺ ∈ [0.05, 1.0] M and
+    Mg²⁺ ∈ [0, 0.1] M at 37 °C (fits to within ±0.005 kcal/mol per bp;
+    see scratch/probe_salt.py):
+
+        ΔG_per_bp = −0.114 · ln([Na⁺] + 3.4·√[Mg²⁺])
+
+    Used by the McCaskill DP: each closed base pair contributes a
+    Boltzmann factor of exp(−ΔG_per_bp/RT) on top of its stack /
+    loop / hairpin energy.  At Na⁺=1 M, Mg²⁺=0 the correction is 0.
+    """
+    effective_na = sodium_M + 3.4 * math.sqrt(max(magnesium_M, 0.0))
+    if effective_na <= 0:
+        return 0.0
+    return -0.114 * math.log(effective_na)
+
+
 # ─── private ─────────────────────────────────────────────────────────────────
 
 def _fgc(seq: str) -> float:

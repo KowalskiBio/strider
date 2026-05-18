@@ -145,6 +145,11 @@ def solve_equilibrium(
     # the end.  The shift is (N − 1) · ln(c0_M) per complex of N strands.
     log_c0 = math.log(standard_state_M) if standard_state_M != 1.0 else 0.0
 
+    # Symmetry handling lives at the pfunc layer (the engine.pfunc method is
+    # responsible for σ-correcting homomeric multi-strand complexes), so this
+    # solver assumes every input ΔG already corresponds to the "species"
+    # partition function for that complex.  NUPACK behaves the same way.
+
     for i, name in enumerate(cx_names):
         strands, dG = complexes[name]
         for s in strands:
@@ -157,10 +162,6 @@ def solve_equilibrium(
         # Q at 1 M = Q at c0 / c0^(N-1)  ⇒  add (N-1)·ln(c0) to logQ_input
         # ΔG_1M = ΔG_c0 + (N-1)·RT·ln(c0); logQ_1M = -ΔG_1M/RT
         logQ[i] = -dG / RT - (n_strands_in - 1) * log_c0
-        # Rotational symmetry correction: Q_eff = Q / σ for homomeric complexes.
-        sigma = cyclic_symmetry(list(strands))
-        if sigma > 1:
-            logQ[i] -= math.log(sigma)
 
     b = np.array([float(totals[s]) for s in strand_names])
 

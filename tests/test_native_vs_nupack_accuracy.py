@@ -1,23 +1,18 @@
 """
 Native-backend accuracy benchmark against NUPACK.
 
-These tests quantify the systematic free-energy discrepancy between strider's
-native McCaskill DP and NUPACK's C++ engine.  They are *not* strict equality
-checks — they pin the current accuracy envelope so regressions can be detected.
+At physiological salt (Na⁺=0.137 M, Mg²⁺=0.01 M, the engine default), strider's
+native McCaskill DP now matches NUPACK pfunc to within ~0.05 kcal/mol for the
+hairpin cases below.  The remaining residual (~0.03 kcal/mol on GCATGCATGC) is
+unrelated to salt and not yet characterized.
 
-Findings (May 2026):
-
-* Strider's native backend systematically over-stabilizes by ~0.15–0.50 kcal/mol
-  relative to NUPACK on hairpins with flanking single-stranded regions.
-* The discrepancy grows with stem length (≈0.05 kcal/mol per stem base-pair).
-* Root cause is the **external-loop dangle / terminal-mismatch model**.  Probe
-  experiments (``scratch/tm_formula_test.py``) show NUPACK applies 5'- and
-  3'-dangle bonuses *additively* when both flanking bases are unpaired, whereas
-  strider's ``_apply_coaxial_external`` uses a Boltzmann stacking-ensemble
-  decoration (None / D5 / D3 / TM as mutually exclusive alternatives).
-* Closing the gap requires a structural rewrite of the external-loop DP plus
-  re-derivation of the dangle key formats from the NUPACK C++ source.  This
-  is the open work flagged as "task 5" in the May 2026 roadmap.
+Historical note: an earlier diagnosis attributed a ~0.15–0.50 kcal/mol
+over-stabilization to the external-loop dangle / terminal_mismatch model.
+That was wrong — ``STK_TM_DELTA`` is algebraically ``STK_D5_DELTA · STK_D3_DELTA``,
+so the Boltzmann decoration form and NUPACK's additive form are identical.
+The actual cause was the missing per-base-pair salt correction in the native
+ensemble DP, now applied via :func:`strider.thermo.salt.dg_per_bp_salt`
+(empirical fit: ΔG_per_bp = −0.114·ln([Na⁺] + 3.4·√[Mg²⁺]), kcal/mol).
 
 Skipped automatically when NUPACK is unavailable.
 """
@@ -30,11 +25,11 @@ nupack = pytest.importorskip("nupack", reason="NUPACK not installed")
 
 CASES = [
     # (sequence, max_acceptable_abs_error_kcal_per_mol)
-    ("GCGCAAAAGCGC",       0.5),
-    ("AGCGCAAAAGCGCA",     0.6),
-    ("GCATGCATGC",         0.3),
-    ("ATATATATATATATAT",   0.4),
-    ("GCGCGCAAAAGCGCGC",   0.6),
+    ("GCGCAAAAGCGC",       0.05),
+    ("AGCGCAAAAGCGCA",     0.05),
+    ("GCATGCATGC",         0.05),
+    ("ATATATATATATATAT",   0.05),
+    ("GCGCGCAAAAGCGCGC",   0.05),
 ]
 
 
@@ -53,8 +48,8 @@ def test_native_within_tolerance_of_nupack(seq, tol):
     )
 
 
-def test_systematic_bias_documented():
-    """Native consistently OVER-stabilizes vs NUPACK (negative bias)."""
+def test_mean_bias_near_zero():
+    """Mean native−NUPACK bias must be near zero (was -0.33 before salt fix)."""
     from strider.thermo.engine import ThermoEngine
     eng_n = ThermoEngine(material="dna", celsius=37.0, backend="nupack")
     eng_s = ThermoEngine(material="dna", celsius=37.0, backend="native")
@@ -65,6 +60,4 @@ def test_systematic_bias_documented():
         gs = eng_s.pfunc(seq).free_energy
         diffs.append(gs - gn)
     mean_diff = sum(diffs) / len(diffs)
-    # The bias is currently negative (strider over-stabilizes).  If this flips
-    # sign, the external-loop fix is in and the test should be updated.
-    assert mean_diff < 0, f"unexpected: mean bias {mean_diff:+.3f} is non-negative"
+    assert abs(mean_diff) < 0.02, f"mean bias {mean_diff:+.3f} kcal/mol exceeds 0.02"

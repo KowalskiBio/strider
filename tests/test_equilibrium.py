@@ -138,34 +138,36 @@ class TestCyclicSymmetry:
         assert cyclic_symmetry(["A", "A", "B"]) == 1
 
 
-class TestSymmetryInSolver:
-    def test_homodimer_concentration_halved(self):
-        """A homodimer's concentration should be ~1/2 of the same-ΔG heterodimer."""
-        from strider import solve_equilibrium
-        # Homodimer
-        homo = solve_equilibrium(
-            complexes={
-                "A":  (["A"], 0.0),
-                "AA": (["A", "A"], -10.0),
-            },
-            totals={"A": 1e-6},
-            celsius=37.0,
-        )
-        # Reference: heterodimer with same K_eq and same totals split
-        hetero = solve_equilibrium(
-            complexes={
-                "A":  (["A"], 0.0),
-                "B":  (["B"], 0.0),
-                "AB": (["A", "B"], -10.0),
-            },
-            totals={"A": 5e-7, "B": 5e-7},
-            celsius=37.0,
-        )
-        # Without σ correction the homodimer would be ~2x higher than this ratio.
-        # With σ=2, ratio of [AA] / [AB] should be ≈ 0.5 (within a few percent
-        # due to different mass-balance constraints).
-        ratio = homo.concentrations["AA"] / hetero.concentrations["AB"]
-        assert 0.4 < ratio < 0.6, f"unexpected ratio {ratio}"
+class TestSymmetryInEngine:
+    """σ correction is applied at the pfunc layer (in ThermoEngine), not by
+    the solver, so that NUPACK and native backends produce comparable ΔG.
+    """
+
+    def test_native_homodimer_pfunc_includes_sigma(self):
+        from strider.thermo.engine import ThermoEngine
+        from strider.thermo.ensemble import multistrand_pairs
+        eng = ThermoEngine(material="dna", celsius=37.0,
+                           sodium=0.137, magnesium=0.01, backend="native")
+        # σ-corrected ΔG (engine.pfunc) should be HIGHER than the raw DP value
+        # by RT·ln(2) ≈ 0.43 kcal/mol for a homodimer.  Pass the engine's salt
+        # to the raw DP so both sides see the same per-bp salt correction.
+        seq = "GCGCGCAAAA"
+        raw, _ = multistrand_pairs([seq, seq], 37.0, "dna", 0.137, 0.01)
+        corrected = eng.pfunc(seq, seq).free_energy
+        import math
+        expected_delta = 1.987e-3 * 310.15 * math.log(2)
+        assert abs((corrected - raw) - expected_delta) < 1e-6
+
+    def test_heterodimer_no_correction(self):
+        from strider.thermo.engine import ThermoEngine
+        from strider.thermo.ensemble import multistrand_pairs
+        eng = ThermoEngine(material="dna", celsius=37.0,
+                           sodium=0.137, magnesium=0.01, backend="native")
+        a, b = "GCGCGCAAAA", "TTTTGCGCGC"
+        raw, _ = multistrand_pairs([a, b], 37.0, "dna", 0.137, 0.01)
+        corrected = eng.pfunc(a, b).free_energy
+        # σ = 1 → no shift
+        assert abs(corrected - raw) < 1e-6
 
 
 class TestEquilibriumFromEngine:

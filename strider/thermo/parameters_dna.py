@@ -3386,6 +3386,10 @@ INTERIOR_2_2: dict[str, float] = {
 #   bm_total_d5_flank    = 1 + STK_D5_DELTA[xyn]
 #   bm_total_d3_flank    = 1 + STK_D3_DELTA[myx]
 #   bm_total_both_flanks = 1 + d5_delta + d3_delta + STK_TM_DELTA[nxym]
+# NUPACK applies dangles additively at each end: Z_both = (1+b5)*(1+b3).
+# That expands to 1 + b5 + b3 + b5*b3, so STK_TM_DELTA stores b5*b3 — every
+# entry equals STK_D5_DELTA[xyn] * STK_D3_DELTA[myx] at the matching key
+# (verified by exhaustive comparison; scratch/tm_formula_test.py).
 STK_BARE_FACTOR: dict[str, float] = {
     "AT": 1.0, "TA": 1.0, "GC": 1.0, "CG": 1.0,
 }

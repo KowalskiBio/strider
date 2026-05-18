@@ -1,12 +1,14 @@
 # strider-dna — Nucleic Acid Thermodynamics, Kinetics, and Circuit Design
 
-[![Tests](https://img.shields.io/badge/tests-76%20passed-brightgreen)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-193%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
-**strider** is a Python library for computing the thermodynamics and kinetics of DNA/RNA circuits. Given a set of strand sequences, it predicts free energies via nearest-neighbor parameters, folds secondary structures via dynamic programming, derives TMSD rate constants from the Zhang & Winfree (2009) empirical model, enumerates spurious leakage pathways, and produces kinetic rate dictionaries that drop directly into a mantis-delta `CRNetwork`. The design loop — sequence → thermodynamics → kinetics → reaction network → steady states — runs end-to-end without any NUPACK or ViennaRNA dependency.
+**strider** is a Python library for computing the thermodynamics and kinetics of DNA/RNA circuits. Given a set of strand sequences, it predicts free energies via nearest-neighbor parameters, folds secondary structures via dynamic programming, derives TMSD rate constants from the Zhang & Winfree (2009) empirical model, enumerates spurious leakage pathways, and produces kinetic rate dictionaries that drop directly into a mantis-delta `CRNetwork`. The full pipeline — sequence → thermodynamics → kinetics → reaction network → steady states / stochastic trajectories / bifurcation — runs end-to-end without any NUPACK or ViennaRNA dependency.
 
-strider ships a three-backend thermodynamic engine that automatically selects the best available calculator: its own McCaskill O(n³) partition-function DP (always available, matches ViennaRNA/NUPACK to within ~0.1 kcal/mol for bimolecular binding), the ViennaRNA C library (recommended for long sequences), or NUPACK (highest accuracy, restrictive license). The same API surface works with every backend — only the `ThermoEngine(backend=…)` argument changes.
+strider ships a three-backend thermodynamic engine that automatically selects the best available calculator: its own McCaskill O(n³) partition-function DP (always available, matches ViennaRNA/NUPACK to within ~0.1 kcal/mol for bimolecular binding), the ViennaRNA C library (recommended for long sequences), or NUPACK (highest accuracy, restrictive license). The same API surface works with every backend — only the `ThermoEngine(backend=…)` argument changes. NUPACK pfunc values are auto-shifted to a 1 M standard state so engine output is backend-agnostic.
+
+Beyond thermodynamics, strider provides a **circuit catalog** of ready-made DSD templates (CHA, HCR, seesaw gates, translators) wrapped around a generic verification framework, a **pure-thermo concentration solver** that matches NUPACK's `tube_analysis` to ~1 %, **Boltzmann sampling** and **suboptimal-structure enumeration** on top of the partition function, an **`Assay` / `AssayPanel`** design abstraction for ensemble-defect minimization, a lightweight **`DSDCompiler`** for domain-level sequence assembly, and — via the companion **mantis** library — Gillespie SSA stochastic simulation in addition to deterministic ODE integration.
 
 ---
 
@@ -15,26 +17,31 @@ strider ships a three-backend thermodynamic engine that automatically selects th
 1. [Installation](#installation)
 2. [Core concepts](#core-concepts)
 3. [Quick start](#quick-start)
-4. [User guide](#user-guide)
+4. [Command-line interface](#command-line-interface)
+5. [User guide](#user-guide)
    - [ThermoEngine and backends](#1-thermoengine-and-backends)
    - [DNA / RNA thermodynamics](#2-dna--rna-thermodynamics)
    - [Secondary structure prediction](#3-secondary-structure-prediction)
-   - [TMSD kinetics](#4-tmsd-kinetics)
-   - [Leakage enumeration](#5-leakage-enumeration)
-   - [Sequence design](#6-sequence-design)
-   - [Mutation sensitivity analysis](#7-mutation-sensitivity-analysis)
-   - [Off-target screening](#8-off-target-screening)
-   - [CHABridge — sequences to mantis CRNetwork](#9-chabridge--sequences-to-mantis-crnetwork)
-   - [Parameter sweeps and caching](#10-parameter-sweeps-and-caching)
-   - [Export formats](#11-export-formats)
-5. [API reference](#api-reference)
-6. [Examples](#examples)
-7. [Backend comparison](#backend-comparison)
-8. [Running the tests](#running-the-tests)
-9. [Troubleshooting](#troubleshooting)
-10. [Background and theory](#background-and-theory)
-11. [Citation](#citation)
-12. [License](#license)
+   - [Boltzmann sampling and subopt enumeration](#4-boltzmann-sampling-and-subopt-enumeration)
+   - [TMSD kinetics](#5-tmsd-kinetics)
+   - [Leakage enumeration](#6-leakage-enumeration)
+   - [Equilibrium concentration solver](#7-equilibrium-concentration-solver)
+   - [Sequence design and the Assay abstraction](#8-sequence-design-and-the-assay-abstraction)
+   - [Mutation sensitivity analysis](#9-mutation-sensitivity-analysis)
+   - [Off-target screening](#10-off-target-screening)
+   - [Circuit catalog and the mantis bridge](#11-circuit-catalog-and-the-mantis-bridge)
+   - [DSDCompiler — domain-level circuit assembly](#12-dsdcompiler--domain-level-circuit-assembly)
+   - [Stochastic simulation via mantis](#13-stochastic-simulation-via-mantis)
+   - [Parameter sweeps and caching](#14-parameter-sweeps-and-caching)
+   - [Export formats](#15-export-formats)
+6. [API reference](#api-reference)
+7. [Examples](#examples)
+8. [Backend comparison](#backend-comparison)
+9. [Running the tests](#running-the-tests)
+10. [Troubleshooting](#troubleshooting)
+11. [Background and theory](#background-and-theory)
+12. [Citation](#citation)
+13. [License](#license)
 
 ---
 
@@ -54,7 +61,7 @@ pip install -e .
 
 ```bash
 pip install strider-dna[vienna]   # ViennaRNA backend (recommended for long sequences)
-pip install strider-dna[mantis]   # mantis-delta integration (CHABridge)
+pip install strider-dna[mantis]   # mantis-delta integration (circuit templates, CRNetwork)
 pip install strider-dna[pandas]   # SweepResult.to_dataframe()
 pip install strider-dna[parallel] # ProcessPoolExecutor sweeps
 pip install strider-dna[full]     # all of the above
@@ -65,7 +72,9 @@ pip install strider-dna[full]     # all of the above
 > **Note on import name:** the PyPI distribution is `strider-dna`, but the Python package is imported as `strider`:
 > ```python
 > import strider
-> from strider import ThermoEngine, CHABridge
+> from strider import ThermoEngine, CHA, HCR, SeesawGate, Translator
+> from strider import Assay, AssayPanel, Assembly, DSDCompiler
+> from strider import solve_equilibrium, sample_structures, subopt_structures
 > ```
 
 ---
@@ -88,14 +97,14 @@ A mechanism in which a short single-stranded overhang (the *toehold*) on a targe
 
 ### Kinetic stability and the sweet spot
 
-Hairpin kinetics for CHA have a "sweet spot": stems stable enough to suppress leakage (ΔG ≲ −6 kcal/mol) but not so stable that the toehold is buried (ΔG ≳ −12 kcal/mol). strider's `CHABridge.verify()` checks all seven design criteria automatically.
+Hairpin kinetics for CHA have a "sweet spot": stems stable enough to suppress leakage (ΔG ≲ −6 kcal/mol) but not so stable that the toehold is buried (ΔG ≳ −12 kcal/mol). The `CHA` circuit template's `verify()` method checks this and several other design criteria via the generic `CheckRegistry` framework — easy to extend with custom checks for non-CHA topologies (`HCR`, `SeesawGate`, etc.).
 
 ---
 
 ## Quick start
 
 ```python
-from strider import ThermoEngine, CHABridge
+from strider import ThermoEngine, CHA, solve_equilibrium
 
 # Create a thermodynamic engine (auto-selects best available backend)
 engine = ThermoEngine(material='dna', celsius=37, sodium=0.137, magnesium=0.01)
@@ -112,8 +121,20 @@ ddg = engine.ddg(
 )
 print(f"ΔΔG = {ddg:.2f} kcal/mol")  # ΔΔG = -8.3 kcal/mol
 
-# Full CHA biosensor verification
-bridge = CHABridge(
+# Equilibrium concentrations of a 2-strand mix
+res = solve_equilibrium(
+    complexes={
+        'A':  (['A'], 0.0),
+        'B':  (['B'], 0.0),
+        'AB': (['A', 'B'], -10.0),
+    },
+    totals={'A': 1e-7, 'B': 1e-7},
+    celsius=37.0,
+)
+print(f"[AB] = {res.concentrations['AB']:.2e} M")  # ~4.0e-8
+
+# Full CHA biosensor verification + mantis export
+cha = CHA(
     sequences={
         'mirna': 'TAGCTTATCAGACTGATGTTGA',
         'H1':    'TCAACATCAGTCTGATAAGGAGGGAGGTTATCAGACTGA',
@@ -122,13 +143,52 @@ bridge = CHABridge(
     },
     engine=engine,
 )
-report = bridge.verify()
-print(report)
-
-# Export to mantis CRNetwork
-rn = bridge.to_crnetwork()           # requires mantis-delta
-rn.simulate(bridge._default_ic(), (0, 7200))
+print(cha.verify())                  # pretty-printed CircuitReport
+rn = cha.to_crnetwork()              # requires mantis-delta
+sim = cha.simulate(                  # deterministic ODE
+    {'mirna': 10e-9, 'H1': 100e-9, 'H2': 100e-9, 'CP': 100e-9}, (0, 7200),
+)
 ```
+
+Beyond CHA: replace `CHA(...)` with `HCR(...)`, `SeesawGate(logic='AND', ...)`, `Translator(...)`, or roll your own subclass of `CircuitTemplate`. Every template has the same `.verify()`, `.to_crnetwork()`, `.simulate()`, `.steady_states()` surface.
+
+---
+
+## Command-line interface
+
+Installing strider registers a `strider` console script. Every subcommand takes `--json` for machine-readable output, and any sequence argument accepts `-` for stdin or `@path` for a file.
+
+```bash
+# MFE structure
+$ strider fold GCGCAAAAGCGC
+GCGCAAAAGCGC
+((((....))))
+ΔG = -2.350 kcal/mol  (4 bp)
+
+# Ensemble ΔG (single- or multi-strand)
+$ strider pfunc GCGCAAAAGCGC
+ΔG_ens = -3.127 kcal/mol  (Z = 159.7, backend=native)
+
+$ strider pfunc GCGCATGC GCATGCGC --backend nupack
+
+# Duplex ΔG and melting temperature
+$ strider duplex GCGCATGC                     # auto-uses reverse complement
+$ strider duplex GCGCATGC GCATGCGC --sodium 0.05
+
+# Tm only
+$ strider melt GCGCATGCATGC --strand-conc 1e-7
+
+# Co-transcriptional folding trajectory
+$ strider cotx GGGAAACCCAAAGGG --min-length 5 --material rna
+   5  .....              ΔG=+0.000
+   ...
+  15  (((...)))(((...))) ΔG=-2.240
+
+# CHA / circuit verification from a JSON sequence spec
+$ strider verify cha_spec.json
+```
+
+All commands accept `--celsius`, `--material {dna,rna}`, `--sodium`, `--magnesium`, and `--backend` where relevant. Run `strider <cmd> --help` for full options.
 
 ---
 
@@ -239,7 +299,12 @@ print(f"Toehold accessible in {prob:.1%} of ensemble")
 
 #### Salt corrections
 
-Salt corrections for non-1M NaCl and Mg²⁺ are applied automatically when `sodium ≠ 1.0` or `magnesium > 0`. strider uses Owczarzy et al. (2004) for Na⁺ and Owczarzy et al. (2008) for Mg²⁺, with a mixed-ion regime from the √[Mg²⁺]/[Na⁺] ratio.
+Salt corrections for non-1M NaCl and Mg²⁺ are applied automatically when `sodium ≠ 1.0` or `magnesium > 0`. Two distinct corrections are wired in:
+
+- **Duplex / melting temperature** — Owczarzy et al. (2004) for Na⁺ and Owczarzy et al. (2008) for Mg²⁺, with a mixed-ion regime from the √[Mg²⁺]/[Na⁺] ratio.
+- **Partition function / ensemble ΔG** — per-base-pair correction ``ΔG_per_bp = −0.114·ln([Na⁺] + 3.4·√[Mg²⁺])`` kcal/mol, applied to each closed pair inside the McCaskill DP so it is automatically ensemble-weighted by the pair probability. This is an empirical fit to NUPACK pfunc (±0.005 kcal/mol/bp over Na⁺ ∈ [0.05, 1.0] M, Mg²⁺ ∈ [0, 0.1] M); see `strider.thermo.salt.dg_per_bp_salt`.
+
+The two formulas serve different purposes (Tm uses the original Owczarzy Tm-shift form; pfunc needs a per-pair ΔG that integrates over the structural ensemble). Both reduce to zero at 1 M Na⁺ / 0 Mg²⁺, the SantaLucia/Turner reference state.
 
 #### Chemical modifications (LNA, 2′OMe, PS)
 
@@ -289,6 +354,24 @@ structure, energy, pairs = fold_pseudoknot('GGGCCCTTTGGGCCC')
 print(structure)    # e.g. '(((....[[)))....]]]'
 ```
 
+#### Co-transcriptional folding
+
+`fold_cotranscriptional()` sweeps prefix lengths and folds each one, returning the trajectory of structures the strand passes through while being transcribed. This matters for riboswitches, aptamers, and any RNA whose biology depends on a kinetic intermediate rather than the final MFE:
+
+```python
+from strider import fold_cotranscriptional
+
+traj = fold_cotranscriptional('GGGAAACCCAAAGGG', material='rna', min_length=5)
+for p in traj.prefixes:
+    print(f'{p.length:>3}  {p.structure}  ΔG={p.energy:+.2f}')
+
+# Detect where existing pairs broke as 3' sequence arrived
+print(traj.rearrangements())   # e.g. [(9, 12)] — refold between length 9 and 12
+print(traj.final().structure)  # fully-transcribed MFE
+```
+
+`step=N` subsamples every Nth prefix for long sequences. The full-length prefix is always included regardless of step.
+
 #### Dot-bracket parsing and analysis
 
 ```python
@@ -319,7 +402,48 @@ print(f"Structure distance: {dist:.3f}")
 
 ---
 
-### 4. TMSD kinetics
+### 4. Boltzmann sampling and subopt enumeration
+
+When the MFE structure alone misrepresents the ensemble (e.g. competing folds within a few kcal/mol of the optimum), two routines on top of the partition function help inspect what's really happening.
+
+#### Boltzmann sampling
+
+Draw `n` structures distributed according to their equilibrium probabilities (Ding & Lawrence 2003, stochastic traceback over the Qb/Q/QM matrices):
+
+```python
+from strider import sample_structures
+from collections import Counter
+
+samples = sample_structures('GCGCGCAAAAGCGCGC', n_samples=100, seed=0)
+counts = Counter(db for db, _ in samples)
+for db, n in counts.most_common(5):
+    print(f"{n:3d}  {db}")
+# 78  ((((((....))))))      ← MFE dominates for a strong hairpin
+#  9  ............
+#  5  (((((......))))).
+#  ...
+```
+
+#### Suboptimal-structure enumeration
+
+Enumerate *all* structures within `gap` kcal/mol of the MFE (Wuchty-style worklist over the V/W matrices, energy-pruned):
+
+```python
+from strider import subopt_structures
+
+for db, e, _ in subopt_structures('GCGCAAAAGCGC', gap=3.0, max_structures=20):
+    print(f"{e:7.3f}  {db}")
+# -2.350  ((((....))))
+# -0.110  .(((....))).
+# -0.010  (((......)))
+#  0.000  ............
+```
+
+Both procedures are also exposed as engine methods (`engine.sample(seq, n)` and `engine.subopt(seq, gap)`) for use inside design objectives.
+
+---
+
+### 5. TMSD kinetics
 
 #### Toehold rate constants
 
@@ -392,7 +516,7 @@ ddg = ddg_from_k_eq(keq, celsius=37.0)    # ≈ -8.5
 
 ---
 
-### 5. Leakage enumeration
+### 6. Leakage enumeration
 
 `LeakageEnumerator` systematically checks all pairwise (and optional tripartite) strand combinations for thermodynamically favorable spurious complexes:
 
@@ -435,7 +559,59 @@ Each `SpuriousReaction` has a `pathway_type` classifying it as `"hybridization"`
 
 ---
 
-### 6. Sequence design
+### 7. Equilibrium concentration solver
+
+`solve_equilibrium()` returns the equilibrium concentration of every complex in a multi-strand mixture given total strand concentrations and per-complex partition functions. It solves the convex dual of the standard mass-action problem (Dirks et al. 2007) via damped Newton iteration on chemical potentials, matching NUPACK's `tube_analysis` to within ~1 % on the validated test cases.
+
+```python
+from strider import solve_equilibrium
+
+res = solve_equilibrium(
+    complexes={
+        'A':  (['A'],      0.0),
+        'B':  (['B'],      0.0),
+        'AB': (['A', 'B'], -10.0),     # ΔG of the dimer (kcal/mol, 1 M standard)
+    },
+    totals={'A': 1e-7, 'B': 1e-7},
+    celsius=37.0,
+)
+print(res.converged, res.iterations, res.residual)
+print(res.concentrations)              # {'A': 6.0e-8, 'B': 6.0e-8, 'AB': 4.0e-8}
+print(res.strand_free)                 # {'A': 6.0e-8, 'B': 6.0e-8}
+```
+
+For a NUPACK round-trip — where NUPACK reports ΔG at the water-molarity (~55 M) standard state instead of 1 M — pass `standard_state_M=water_molarity(celsius)` so the solver applies the corresponding shift:
+
+```python
+from strider import solve_equilibrium, water_molarity
+res = solve_equilibrium(complexes, totals, standard_state_M=water_molarity(37.0))
+```
+
+#### Auto-enumeration from a ThermoEngine
+
+`equilibrium_from_engine` enumerates all complexes up to a chosen strand count, computes each pfunc with the active backend, then solves:
+
+```python
+from strider import equilibrium_from_engine, ThermoEngine
+
+engine = ThermoEngine(material='dna', celsius=37, sodium=0.137, magnesium=0.01)
+res = equilibrium_from_engine(
+    engine,
+    strands={'A': 'GCGCGCAAAA', 'B': 'TTTTGCGCGC', 'C': 'GCATATGC'},
+    totals={'A': 1e-7, 'B': 1e-7, 'C': 1e-7},
+    max_size=3,                         # enumerate monomers, dimers, trimers
+)
+for name, c in sorted(res.concentrations.items(), key=lambda kv: -kv[1])[:5]:
+    print(f"{name:6s} {c:.2e} M")
+```
+
+#### Rotational symmetry
+
+`cyclic_symmetry(strand_list)` returns the cyclic-symmetry number σ used to correct homomeric multi-strand pfunc values. Strider's native backend applies this correction automatically inside `ThermoEngine.pfunc` so that *every* backend reports species-level (not ordered-complex) ΔG. The same applies when feeding NUPACK pfunc values into `solve_equilibrium`: NUPACK's reported Q already includes σ, so no double correction is needed.
+
+---
+
+### 8. Sequence design and the Assay abstraction
 
 `SequenceDesigner` minimizes a composable `DesignObjective` using simulated annealing. Free domains are optimized; fixed domains (e.g. the miRNA binding site) are held constant.
 
@@ -487,6 +663,7 @@ print(result.objective_breakdown)
 | `DesignObjective.ddg_range(engine, reactants, products, min, max)` | ΔΔG outside [min, max] |
 | `DesignObjective.minimize_leakage(engine, strand_names, threshold)` | Pairwise ΔΔG below threshold |
 | `DesignObjective.toehold_accessible(engine, strand_name, positions, min_prob)` | Low toehold accessibility |
+| `DesignObjective.ensemble_defect(engine, strand_names, target_structure)` | NUPACK-style expected mispaired nucleotides vs target dot-bracket |
 | `DesignObjective.gc_content(strand_name, target_gc)` | (GC − target)² |
 | `DesignObjective.from_callable(fn)` | Any Python callable returning a float |
 
@@ -508,9 +685,43 @@ total = 2.0 * objective_a + objective_b + 0.5 * objective_c
 | `HardConstraint.min_length(length)` | Minimum sequence length |
 | `HardConstraint.from_callable(fn)` | Any `(name, seq) → bool` |
 
+#### Assay / AssayPanel — high-level design intent
+
+For circuit-level design, `Assay` bundles a set of on-target assemblies (each with its dot-bracket target and expected concentration) plus off-target assemblies that must *not* form. It compiles into a `DesignObjective` that the designer minimizes:
+
+```python
+from strider import Assay, AssayPanel, Assembly, SequenceDesigner, DomainSpec
+
+assay = Assay(
+    name='hairpin_sensor',
+    on_targets=[
+        Assembly('H', ['H'], '((((....))))', concentration=1e-7),
+    ],
+    off_targets=[
+        Assembly('H_H', ['H', 'H']),       # forbid homodimer
+    ],
+    off_target_ddg_threshold=-4.0,         # penalize binding stronger than this
+)
+
+designer = SequenceDesigner(engine, seed=0)
+result = designer.design(
+    domains={'H': DomainSpec(length=12)},
+    objective=assay.to_objective(engine),
+    n_trials=4,
+    max_iterations=200,
+)
+```
+
+An `AssayPanel` sums multiple `Assay` objectives so you can design across several test tubes at once:
+
+```python
+panel = AssayPanel(assays=[assay_low_temp, assay_high_temp])
+objective = panel.to_objective(engine)
+```
+
 ---
 
-### 7. Mutation sensitivity analysis
+### 9. Mutation sensitivity analysis
 
 `MutationAnalyzer` computes how each nucleotide position contributes to a thermodynamic metric by exhaustively scanning all single-nucleotide mutations:
 
@@ -537,7 +748,7 @@ profile.plot(title="H1 mutation sensitivity")
 
 ---
 
-### 8. Off-target screening
+### 10. Off-target screening
 
 `OffTargetScreener` screens a probe sequence against a reference database (FASTA) using k-mer pre-filtering followed by full ΔΔG evaluation:
 
@@ -575,101 +786,198 @@ screener.add_sequences({'miR155': 'UUAAUGCUAAUUGUGAUAGGGGU'})
 
 ---
 
-### 9. CHABridge — sequences to mantis CRNetwork
+### 11. Circuit catalog and the mantis bridge
 
-`CHABridge` encodes the 4-reaction CHA topology and automates all thermodynamic verification checks from the NUPACK design workflow, but without any NUPACK dependency.
+strider ships a catalog of DSD circuit templates under `strider.circuits`. All templates share the same API: a strand set, a reaction topology, a toehold map, and a default check suite. Each emits a `CircuitBridge` for use with the mantis simulator.
 
 ```python
-from strider import ThermoEngine, CHABridge
+from strider import CHA, HCR, SeesawGate, Translator
+```
 
-engine = ThermoEngine(material='dna', celsius=37, sodium=0.137, magnesium=0.01)
+#### CHA — Catalytic Hairpin Assembly
 
-bridge = CHABridge(
+```python
+cha = CHA(
     sequences={
         'mirna': 'TAGCTTATCAGACTGATGTTGA',
         'H1':    'TCAACATCAGTCTGATAAGGAGGGAGGTTATCAGACTGA',
         'H2':    'TCAGTCTGATAAGGAGGGAGGTATCAGACTGATGTTGATTTTT',
         'CP':    'AAAAA',
     },
-    engine=engine,
     toehold_d1=6,    # miRNA·H1 toehold length
     toehold_d2=11,   # H2 branch migration domain
     tail_cp=9,       # CP tail length
 )
 ```
 
-#### Thermodynamic verification
-
-`bridge.verify()` runs all seven design checks and returns a structured report:
+#### HCR — Hybridization Chain Reaction
 
 ```python
-report = bridge.verify()
+hcr = HCR(
+    sequences={'I': '...', 'H1': '...', 'H2': '...'},
+    toehold_initiator=6,
+    toehold_branch=6,
+)
+```
+
+#### SeesawGate — Qian-Winfree compute primitive (YES / AND / OR / NOT)
+
+```python
+gate = SeesawGate(
+    logic='AND',
+    sequences={
+        'Input1': '...', 'Input2': '...',
+        'Gate': '...', 'Threshold_Input1': '...',
+        'Threshold_Input2': '...', 'Fuel': '...', 'Output': '...',
+    },
+    toehold=6,
+)
+```
+
+#### Translator — input strand X triggers release of output strand Y
+
+```python
+tr = Translator(
+    sequences={'X': '...', 'Y': '...', 'Gate': '...'},
+    toehold_x=6,
+)
+```
+
+#### Verification via CheckRegistry
+
+Every template has a `verify()` method that runs its default check suite and returns a structured `CircuitReport`:
+
+```python
+report = cha.verify()
 print(report)
 ```
 
 ```
-CHA Verification: PASS
-  Toehold accessible:    ✓
-  H1 stability:          -8.32 kcal/mol ✓
-  H2 stability:          -7.65 kcal/mol ✓
-  ΔΔG(R1, init):         -8.52 kcal/mol ✓
-  ΔΔG(R2, prop):         -4.81 kcal/mol ✓
-  ΔΔG(R3, detect):       -9.14 kcal/mol ✓
-  ΔΔG(spont leakage):    -5.22 kcal/mol ✓
-  Catalyst recycled:     ✓
-  CP leakage:            -3.88 kcal/mol ✓
-  Predicted signal:      94.7%
+CHA: PASS
+  ✓ toehold_accessible: 0.996 (prob) — unpaired probability 1.00 (≥ 0.50)
+  ✓ H1_stability: -5.07 kcal/mol — normalised ΔG -5.07 kcal/mol (in [-12, -4])
+  ✓ H2_stability: -4.51 kcal/mol — normalised ΔG -4.51 kcal/mol (in [-12, -4])
+  ✓ R1_driving_force: -10.54 kcal/mol — ΔΔG -10.54 kcal/mol (≤ -3.0)
+  ✓ R2_driving_force: -12.89 kcal/mol — ΔΔG -12.89 kcal/mol (≤ -3.0)
+  ✓ R3_driving_force: -9.56 kcal/mol — ΔΔG -9.56 kcal/mol (≤ -8.0)
+  ✓ CP_leakage: -5.14 kcal/mol — ΔΔG -5.14 kcal/mol (≥ -6.0)
+  ✓ spontaneous_leakage: 1.49e-07 ratio — leak/signal = 1.49e-07 (≤ 1e-04)
 ```
 
-| Check | Criterion | Meaning |
-|---|---|---|
-| Toehold accessible | P ≥ 0.50 | ≥50% of H1 ensemble has toehold unpaired |
-| H1/H2 stability | −12 to −4 kcal/mol | Hairpin in kinetic sweet spot |
-| ΔΔG(R1) | < −3 kcal/mol | miRNA·H1 binding is favorable |
-| ΔΔG(R2) | < −3 kcal/mol | Strand exchange favors H1·H2 formation |
-| ΔΔG(R3) | < −8 kcal/mol | CP binds H1·H2 tail strongly |
-| ΔΔG(spont) | > −10 kcal/mol | H1 + H2 → H1·H2 is suppressed in absence of trigger |
-| CP leakage | > −6 kcal/mol | CP does not bind H2 alone |
-
-#### Accessing rates and ΔΔG values
+Build your own checks with `CheckRegistry`:
 
 ```python
-ddg = bridge.ddg_pathway   # dict: {'R1': -8.5, 'R2': -4.8, ..., 'leakage': -5.2}
-rates = bridge.rates        # dict keyed by mantis reaction strings
+from strider import CheckRegistry, stability_in_range, no_spurious_dimer
 
-for rxn, k in rates.items():
-    print(f"{rxn}: {k:.2e}")
+custom = (CheckRegistry()
+    .add(stability_in_range('H1', min_dg=-10, max_dg=-5))
+    .add(no_spurious_dimer('H1', 'CP', min_ddg=-4.0))
+)
+report = cha.verify(registry=custom)
 ```
+
+Built-in checks: `toehold_accessible`, `stability_in_range`, `reaction_driving_force`, `no_spurious_dimer`, `leakage_below_signal`, and `custom(name, fn)` for arbitrary user predicates.
 
 #### Exporting to mantis
 
+Every template has the same downstream methods:
+
 ```python
-rn = bridge.to_crnetwork()          # → mantis.CRNetwork
-ic = bridge._default_ic()           # 100 nM hairpins, 10 nM miRNA, zero complexes
-rn.simulate(ic, (0, 7200))
-ss = rn.steady_states(ic)[0]
-print(ss.concentrations)
+rn = cha.to_crnetwork()                # → mantis.CRNetwork
+sim = cha.simulate(initial_conditions, (0, 7200))
+ss  = cha.steady_states(initial_conditions)
 ```
 
-#### Generic pipeline: any topology
+#### Defining your own circuit
 
-For circuits beyond CHA, `rates_to_crnetwork()` runs the full pipeline with optional leakage enumeration:
+Subclass `CircuitTemplate` to add a new topology — declare reactions and a default check registry, get the full pipeline for free:
 
 ```python
-from strider import rates_to_crnetwork
+from dataclasses import dataclass
+from strider import CircuitTemplate, CheckRegistry, reaction_driving_force
 
-rn = rates_to_crnetwork(
-    reaction_strings=["A + B <-> AB", "AB + C <-> ABC"],
-    sequences={'A': 'ATCG...', 'B': 'CGAT...', 'C': 'TTTT...'},
-    engine=engine,
+@dataclass
+class MyAmplifier(CircuitTemplate):
+    def __post_init__(self):
+        if self.name == 'circuit':
+            self.name = 'MyAmplifier'
+        self.reactions = ['A + B <-> AB', 'AB + C -> AC + B']
+        self.toehold_map = {'A + B <-> AB': 6}
+
+    def _default_checks(self):
+        return (CheckRegistry()
+            .add(reaction_driving_force(['A', 'B'], [['A', 'B']], max_ddg=-3.0)))
+```
+
+#### Generic CircuitBridge
+
+For ad-hoc circuits without a dedicated template, `CircuitBridge` accepts any list of reaction strings:
+
+```python
+from strider import CircuitBridge
+
+bridge = CircuitBridge(
+    reactions=['A + B <-> AB', 'AB + C <-> ABC'],
+    sequences={'A': '...', 'B': '...', 'C': '...'},
     include_leakage=True,
     leakage_threshold=-4.0,
 )
+rn = bridge.to_crnetwork()
 ```
+
+> **Compatibility note:** `CHABridge` from the prior API is still available and unchanged, but new code should prefer `strider.circuits.CHA`, which uses the generic check registry and composes with other templates.
 
 ---
 
-### 10. Parameter sweeps and caching
+### 12. DSDCompiler — domain-level circuit assembly
+
+`DSDCompiler` lets you describe a circuit in *domain space* — registered domains plus strands defined as ordered domain lists — and resolves to nucleotide sequences automatically, including reverse-complement (`a*`) generation.
+
+```python
+from strider import DSDCompiler
+
+dsd = DSDCompiler(domains={
+    't': 'GCATGC',            # toehold
+    'a': 'ATGCATATGC',         # branch migration region
+    'b': 'TTGCATGCAA',         # extension
+})
+dsd.add_strand('S1', ['t', 'a', 'b'])
+dsd.add_strand('S2', ['b*', 'a*', 't*'])         # auto-derived complements
+dsd.add_reaction('S1 + S2 <-> S1_S2', toehold='t')
+
+print(dsd)                                        # pretty-printed circuit
+bridge = dsd.to_bridge()                          # CircuitBridge
+rn = bridge.to_crnetwork()
+```
+
+The compiler intentionally does *not* infer reactions from strand topology — you still write them explicitly. The job is to keep the symbolic layer (domains, strands) in sync with the sequence layer.
+
+---
+
+### 13. Stochastic simulation via mantis
+
+For low-copy-number regimes where deterministic ODE breaks down (e.g. single-cell concentrations, stochastic switching in bistable circuits), mantis provides a Gillespie SSA direct-method simulator:
+
+```python
+rn = cha.to_crnetwork()
+
+# 100 µL = 1e-4 L  →  10 nM mirna ≈ 600 molecules
+result = rn.stochastic_simulate(
+    initial_conditions={'mirna': 10e-9, 'H1': 100e-9, 'H2': 100e-9, 'CP': 100e-9},
+    t_span=(0.0, 60.0),
+    volume_L=1e-4,
+    seed=0,
+)
+print(result.n_events, result.success)
+print(result.final())               # {'mirna': ..., 'H1': ..., ...}
+print(result.counts['H1_H2'][-1])   # integer molecule count
+```
+
+`StochasticResult` carries both `.counts` (integer arrays) and `.concentrations` (M). For cellular volumes use `volume_L ≈ 1e-15` and `initial_as='count'` to specify molecule counts directly. The deterministic `simulate()` and the stochastic `stochastic_simulate()` should agree in the high-count limit; for `< ~10³` molecules they typically diverge.
+
+---
+
+### 14. Parameter sweeps and caching
 
 `ParameterSweep` runs any callable over an N-dimensional grid with transparent caching and optional parallelism.
 
@@ -728,7 +1036,7 @@ with cache:             # context manager closes the connection
 
 ---
 
-### 11. Export formats
+### 15. Export formats
 
 ```python
 from strider import to_vienna, to_ct, to_bpseq, to_fasta, to_oxdna, write
@@ -771,7 +1079,11 @@ ThermoEngine(
 | Method | Returns | Description |
 |---|---|---|
 | `mfe(*sequences)` | `MFEResult` | Minimum free energy structure |
-| `pfunc(*sequences)` | `PFuncResult` | Ensemble free energy and pair probability matrix |
+| `pfunc(*sequences)` | `PFuncResult` | Ensemble free energy and pair probability matrix (σ-corrected for homomeric multi-strand) |
+| `pairs(*sequences)` | `np.ndarray` | Pair-probability matrix only |
+| `ensemble_defect(seqs, target_structure, normalize=True)` | `float` | Expected mispaired nucleotides vs a target dot-bracket |
+| `sample(seq, n_samples, seed=None)` | `list[(str, list)]` | Boltzmann-sampled structures |
+| `subopt(seq, gap=1.0, max_structures=200)` | `list[(str, float, list)]` | Suboptimal structures within `gap` of MFE |
 | `duplex_dg(seq1, seq2=None)` | `float` | ΔG of hybridization; `seq2=None` → intramolecular folding |
 | `ddg(reactants, products)` | `float` | ΔΔG = Σ G(products) − Σ G(reactants) (kcal/mol) |
 | `toehold_accessibility(seq, positions)` | `float` | Fraction of ensemble with all toehold positions unpaired |
@@ -802,26 +1114,79 @@ class PFuncResult:
 
 ---
 
-### `CHABridge`
+### Circuit templates
+
+All templates subclass `CircuitTemplate` and share the same downstream surface.
+
+| Class | Required keys | Key parameters |
+|---|---|---|
+| `CHA(sequences, ...)` | `mirna`, `H1`, `H2`, `CP` | `toehold_d1=6, toehold_d2=11, tail_cp=9` |
+| `HCR(sequences, ...)` | `I`, `H1`, `H2` | `toehold_initiator=6, toehold_branch=6` |
+| `Translator(sequences, ...)` | `X`, `Y`, `Gate` | `toehold_x=6` |
+| `SeesawGate(sequences, ...)` | `Input1`, [`Input2`,] `Gate`, `Threshold[_InputN]`, `Fuel`, `Output` | `logic='YES'\|'AND'\|'OR'\|'NOT'`, `toehold=6` |
+
+Shared methods:
+
+| Method | Returns | Description |
+|---|---|---|
+| `to_bridge(include_leakage=False, leakage_threshold=-4.0)` | `CircuitBridge` | Build the generic mantis bridge |
+| `to_crnetwork(**kw)` | `mantis.CRNetwork` | Shortcut: bridge → network |
+| `simulate(ic, t_span, **kw)` | `SimulationResult` | Deterministic ODE |
+| `steady_states(ic, **kw)` | `list[SteadyState]` | mantis steady-state finder |
+| `verify(registry=None)` | `CircuitReport` | Run default (or user) check suite |
+
+### `CircuitBridge` and `CHABridge`
+
+`CircuitBridge(reactions, sequences, engine=None, toehold_map=None, include_leakage=False, leakage_threshold=-4.0)` — generic, accepts any reaction topology. Returned by every template's `to_bridge()`.
+
+`CHABridge(sequences, ...)` is retained for backwards compatibility — same parameters and API as in the original 0.1.0 release. New code should prefer `circuits.CHA`.
+
+### `CheckRegistry`
+
+`CheckRegistry().add(check).add(check)...` → use `.run(engine, sequences, name=...)` to produce a `CircuitReport`.
+
+| Built-in check | Signature |
+|---|---|
+| `toehold_accessible(strand, positions, min_prob=0.5)` | Strand's toehold positions are unpaired ≥ `min_prob` of the ensemble |
+| `stability_in_range(strand, min_dg, max_dg, reference_length=20)` | Normalized hairpin ΔG falls in the sweet spot |
+| `reaction_driving_force(reactants, products, max_ddg=-3.0)` | ΔΔG of the reaction is sufficiently favorable |
+| `no_spurious_dimer(a, b, min_ddg=-6.0)` | Pairwise dimer is NOT too stable |
+| `leakage_below_signal(signal_kf, hairpin, ratio=1e-4)` | Spontaneous breathing rate is ≥ `ratio`× slower than signal |
+| `custom(name, fn)` | Wrap any `(ctx) → (passed, value, msg)` function |
+
+### `solve_equilibrium`
 
 ```python
-CHABridge(
-    sequences,          # dict with keys 'mirna', 'H1', 'H2', 'CP'
-    engine=None,        # ThermoEngine; created with physiological defaults if None
+solve_equilibrium(
+    complexes,                # {name: ([strand_names], dG_kcal_per_mol)}
+    totals,                   # {strand_name: total_concentration_M}
     celsius=37.0,
-    toehold_d1=6,       # toehold length for miRNA·H1 binding
-    toehold_d2=11,      # branch migration domain for H2
-    tail_cp=9,          # CP tail length
-)
+    max_iter=200,
+    tol=1e-9,
+    standard_state_M=1.0,     # use water_molarity(celsius) for NUPACK input
+) → EquilibriumResult
 ```
 
-| Property / method | Returns | Description |
-|---|---|---|
-| `ddg_pathway` | `dict[str, float]` | ΔΔG for all 4 reactions + leakage + CP leakage |
-| `rates` | `dict[str, float]` | mantis-compatible rate dict (kf and kr for all reactions) |
-| `verify()` | `CHAVerificationReport` | Seven-check thermodynamic audit |
-| `to_crnetwork()` | `mantis.CRNetwork` | mantis-ready network; requires mantis-delta |
-| `sensitivity(target_species, perturbation)` | `dict[str, float]` | One-at-a-time rate sensitivity analysis |
+Companions: `equilibrium_from_engine(engine, strands, totals, max_size=2)` for auto-enumeration, `cyclic_symmetry(strand_list)` and `water_molarity(celsius)` helpers.
+
+### `Assay` / `AssayPanel` / `Assembly`
+
+```python
+Assembly(name, strands, structure=None, concentration=1e-6)
+Assay(name, on_targets=[Assembly, ...], off_targets=[Assembly, ...],
+      off_target_ddg_threshold=-4.0, off_target_penalty_weight=1.0)
+AssayPanel(assays=[Assay, ...])
+```
+
+Methods: `defect(sequences, engine) → float`, `to_objective(engine, weight=1.0) → DesignObjective`.
+
+### `DSDCompiler`
+
+```python
+DSDCompiler(domains={name: sequence}).add_strand(name, [domain, ...])
+                                     .add_reaction(rxn_str, toehold=...)
+                                     .to_bridge() → CircuitBridge
+```
 
 ---
 
@@ -962,36 +1327,39 @@ Runs a 2D grid sweep over toehold length and temperature, caches results to disk
 
 The primary validation example. Demonstrates the complete pipeline:
 1. `ThermoEngine` with native backend at physiological conditions
-2. `CHABridge.verify()` — seven-check audit
+2. `CHABridge.verify()` — seven-check audit (the 0.1.0 API; the new `circuits.CHA().verify()` runs the same checks via the generic `CheckRegistry`)
 3. `bridge.to_crnetwork()` — export to mantis CRNetwork
 4. ODE integration and steady-state finding via mantis
 5. `bridge.sensitivity()` — one-at-a-time rate sensitivity analysis
 6. Predicted signal vs. miRNA concentration
 
+> For non-CHA topologies, swap `CHABridge` for `HCR(...)`, `SeesawGate(logic='AND', ...)`, `Translator(...)`, or any custom `CircuitTemplate` subclass — the rest of the pipeline is unchanged.
+
 ---
 
 ## Backend comparison
 
-The native backend uses strider's own McCaskill O(n³) partition-function DP with nick-aware recursions for multi-strand complexes — the same algorithm as ViennaRNA (RNAcofold) and NUPACK. Below are representative comparisons at 37 °C, 137 mM NaCl, 10 mM MgCl₂.
+The native backend uses strider's own McCaskill O(n³) partition-function DP with nick-aware recursions for multi-strand complexes — the same family of algorithm as ViennaRNA (RNAcofold) and NUPACK. NUPACK output is auto-shifted to the 1 M standard state (matching the SantaLucia / Turner convention) and the multi-strand pfunc applies the σ rotational correction internally, so engine output is consistent across backends.
 
 | Calculation | Native | ViennaRNA | NUPACK | Gap (native vs NUPACK) |
 |---|---|---|---|---|
-| ΔG(R1): miR21 + H1 → miR21·H1 | −11.54 | −11.38 | −11.42 | **0.1 kcal/mol** |
-| ΔG(H1): hairpin ensemble | −7.22 | −8.64 | −8.78 | 1.6 kcal/mol |
-| ΔG(spont): H1 + H2 → H1·H2 | −13.3 | −22.8 | −23.4 | 10 kcal/mol |
-| ΔG(R3): H1·H2 + CP → H1·H2·CP | −3.35 | −6.12 | −6.44 | 3.1 kcal/mol |
+| ΔG(R1): miR21 + H1 → miR21·H1 (bimolecular) | −11.54 | −11.38 | −11.42 | **0.1 kcal/mol** |
+| ΔG(H1): hairpin ensemble (12 nt, Na⁺=0.137, Mg²⁺=0.01) | −3.13 | — | −3.12 | **0.01 kcal/mol** |
+| ΔG(GC hairpin, 16 nt) | −7.36 | — | −7.35 | **0.01 kcal/mol** |
+| ΔG(spont): H1 + H2 → H1·H2 (long multi-loop) | −13.3 | −22.8 | −23.4 | 10 kcal/mol |
 
-**Where the native backend matches well:** bimolecular toehold binding reactions (R1) where the dominant contribution is duplex stacking, and individual hairpin ensemble energies for short sequences (< 40 nt). The 0.1 kcal/mol agreement on R1 is sufficient for rate constant estimation to within a factor of 2.
+**Where the native backend matches well:** bimolecular toehold binding (~0.1 kcal/mol) and **single hairpins under physiological salt** (mean bias −0.002 kcal/mol, max 0.03 kcal/mol on the cases pinned by `tests/test_native_vs_nupack_accuracy.py`). Concentration-solver round-trips agree with NUPACK `tube_analysis` to ~1 %.
 
-**Where it diverges:** spontaneous dimerization (long multi-loop structures) and detection reactions (short CP duplexes dominated by end effects). The gaps arise from simplified Turner loop parameters (no tetraloop bonus, no terminal mismatch correction, approximate multi-loop penalty) and missing dangling-end contributions. For publication-quality multi-strand ΔG values, use `backend='vienna'` or `backend='nupack'`.
+**Where it diverges:** long multi-loop / coaxial topologies (10+ kcal/mol gaps on stacked-multiloop complexes). For those, use `vienna` or `nupack`. An earlier 0.15–0.50 kcal/mol systematic over-stabilization on hairpins came from a missing per-base-pair salt correction in the McCaskill DP, now wired in via `strider.thermo.salt.dg_per_bp_salt` (see [Salt corrections](#salt-corrections)).
 
 **When to use each backend:**
 
 | Scenario | Recommended backend |
 |---|---|
 | Rapid screening / design iteration (< 40 nt hairpins) | `native` |
+| Concentration solver / equilibrium analysis | `native` (matches NUPACK to ~1 %) |
 | MFE folding of sequences up to ~200 nt | `vienna` |
-| High-accuracy partition function for multi-strand complexes | `nupack` |
+| High-accuracy partition function for long multi-strand complexes | `nupack` |
 | No external dependencies (CI, lightweight environments) | `native` |
 | Publication-quality thermodynamics | `nupack` or `vienna` |
 
@@ -1005,19 +1373,29 @@ pip install -e .[dev]
 pytest tests/ -v
 ```
 
-The test suite has 79 tests across seven files:
+The test suite has **216 tests** (228 in `nupack_env` where NUPACK round-trip tests light up):
 
 | File | Tests | What is covered |
 |---|---|---|
 | `test_thermo_dna.py` | 16 | NN parameters, duplex_dg, Tm, salt corrections, self-complementarity |
 | `test_tmsd.py` | 15 | toehold_kf table, Arrhenius correction, detailed balance, leakage_kf, Keq conversions |
-| `test_design.py` | 15 | SequenceDesigner SA convergence, DomainSpec, hard constraints, MutationAnalyzer |
+| `test_design.py` | 19 | SequenceDesigner SA convergence, DomainSpec, hard constraints, ensemble defect, MutationAnalyzer |
 | `test_mfe.py` | 12 | fold_mfe correctness, dot-bracket parsing, mountain vectors, structure comparison |
-| `test_bridge.py` | 9 | CHABridge ddg_pathway, verify() seven checks, rates dict, mantis integration |
+| `test_sampling.py` | 11 | Boltzmann sampling distribution, subopt enumeration, energy gap correctness |
+| `test_equilibrium.py` | 17 | concentration solver convergence, σ correction, water-molarity standard state |
+| `test_circuits.py` | 20 | CheckRegistry, CHA/HCR/Translator/SeesawGate templates, custom-registry composition |
+| `test_bridge.py` | 15 | CHABridge ddg_pathway, verify() checks, CircuitBridge generic topology, mantis integration |
+| `test_dsd.py` | 15 | DSDCompiler domain resolution, strand assembly, bridge integration |
+| `test_assay.py` | 8 | Assay/AssayPanel defect, off-target penalty, designer integration |
 | `test_formats.py` | 7 | Vienna, CT, BPSEQ, FASTA, oxDNA output; round-trip pair parsing |
 | `test_leakage.py` | 5 | LeakageEnumerator pairwise enumeration, pathway classification, filter() |
+| `test_screener.py` | 6 | Off-target k-mer screening |
+| `test_cotranscriptional.py` | 9 | Prefix-by-prefix folding trajectory, rearrangement detection |
+| `test_cli.py` | 14 | `strider fold/pfunc/duplex/melt/cotx`, JSON output, stdin / @file sequence input |
+| `test_stack_vs_nupack.py` | 5 | (nupack_env only) — solver vs NUPACK `tube_analysis` round-trip, kinetics → equilibrium |
+| `test_native_vs_nupack_accuracy.py` | 6 | (nupack_env only) — native pfunc within 0.05 kcal/mol of NUPACK at physiological salt |
 
-> **Note:** the three `test_bridge.py` tests that call `bridge.to_crnetwork()` require mantis-delta and are skipped if the package is not installed.
+> **Note:** tests requiring `mantis-delta` are skipped if it is not installed (install via `pip install -e ../mantis` for editable mode).  Tests requiring `nupack` only run when invoked from a Python that has NUPACK importable.
 
 ---
 
@@ -1042,14 +1420,14 @@ The native backend's multi-strand ΔG diverges from NUPACK for:
 
 Switch to `backend='vienna'` or `backend='nupack'` for these cases. For bimolecular toehold binding of typical 6–12 nt toeholds, the native backend agrees to within ~0.1 kcal/mol.
 
-### `CHABridge.verify()` fails spontaneous leakage check
+### `CHA().verify()` fails spontaneous leakage check
 
-`ΔΔG(spont) < −10 kcal/mol` means H1 and H2 hybridize too favorably in the absence of trigger. Common causes:
+A failing `spontaneous_leakage` check means H1 and H2 hybridize too favorably in the absence of trigger. Common causes:
 - H1 and H2 have long complementary stems outside the intended domains
 - The stem domain (D2) is too long or too GC-rich
 - The D3 spacer is not introducing enough disruption
 
-Use `SequenceDesigner` with `DesignObjective.minimize_leakage()` weighted heavily, or add `HardConstraint.no_self_complement(min_length=6)` to suppress cross-complementarity.
+Use `SequenceDesigner` with `DesignObjective.minimize_leakage()` weighted heavily, or add `HardConstraint.no_self_complement(min_length=6)` to suppress cross-complementarity.  The same applies to any `CircuitTemplate` that includes a `leakage_below_signal` check.
 
 ### Design converges to a high score (> 1.0)
 

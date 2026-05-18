@@ -31,9 +31,15 @@ from strider.thermo.salt import owczarzy_tm_correction
 from strider.thermo.modified import ModificationSite, apply_modifications
 
 from strider.structure.mfe import fold_mfe
+from strider.structure.sampling import sample_structures, subopt_structures
 from strider.structure.dot_bracket import parse_pairs, to_dot_bracket, validate
 from strider.structure.pseudoknot import fold_pseudoknot
 from strider.structure.mountain import mountain_vector, compare_structures
+from strider.structure.cotranscriptional import (
+    fold_cotranscriptional,
+    CotranscriptionalTrajectory,
+    PrefixFold,
+)
 
 from strider.kinetics.tmsd import (
     toehold_kf,
@@ -55,6 +61,7 @@ from strider.design.objective import DesignObjective
 from strider.design.constraints import HardConstraint
 from strider.design.optimizer import SequenceDesigner, DomainSpec, DesignResult
 from strider.design.mutation import MutationAnalyzer, MutationProfile
+from strider.design.assay import Assay, AssayPanel, Assembly
 
 from strider.screen.offtarget import OffTargetScreener, ScreeningReport
 
@@ -72,6 +79,15 @@ from strider.equilibrium import (
     cyclic_symmetry, water_molarity,
 )
 
+from strider.dsd import DSDCompiler
+
+from strider.circuits import (
+    CircuitTemplate, HCR, Translator, SeesawGate, CHA,
+    CheckRegistry, CircuitReport, CheckResult,
+    toehold_accessible, stability_in_range, reaction_driving_force,
+    no_spurious_dimer, leakage_below_signal,
+)
+
 __version__ = "0.1.0"
 __author__ = "Emilio Venegas"
 __license__ = "MIT"
@@ -84,7 +100,7 @@ __all__ = [
     "owczarzy_tm_correction",
     "ModificationSite", "apply_modifications",
     # Structure
-    "fold_mfe", "fold_pseudoknot",
+    "fold_mfe", "fold_pseudoknot", "sample_structures", "subopt_structures",
     "parse_pairs", "to_dot_bracket", "validate",
     "mountain_vector", "compare_structures",
     # Kinetics
@@ -96,6 +112,7 @@ __all__ = [
     "DesignObjective", "HardConstraint",
     "SequenceDesigner", "DomainSpec", "DesignResult",
     "MutationAnalyzer", "MutationProfile",
+    "Assay", "AssayPanel", "Assembly",
     # Screening
     "OffTargetScreener", "ScreeningReport",
     # Bridge to mantis
@@ -105,6 +122,13 @@ __all__ = [
     # Equilibrium
     "solve_equilibrium", "equilibrium_from_engine", "EquilibriumResult",
     "cyclic_symmetry", "water_molarity",
+    # DSD
+    "DSDCompiler",
+    # Circuit templates
+    "CircuitTemplate", "HCR", "Translator", "SeesawGate", "CHA",
+    "CheckRegistry", "CircuitReport", "CheckResult",
+    "toehold_accessible", "stability_in_range", "reaction_driving_force",
+    "no_spurious_dimer", "leakage_below_signal",
     # Export
     "to_vienna", "to_ct", "to_bpseq", "to_fasta", "to_oxdna", "write",
 ]

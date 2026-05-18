@@ -50,6 +50,8 @@ def ensemble_dg(
     sequence: str,
     celsius: float = 37.0,
     material: str = "dna",
+    sodium_M: float = 1.0,
+    magnesium_M: float = 0.0,
 ) -> tuple[float, np.ndarray]:
     """
     Ensemble free energy and base-pair probability matrix.
@@ -57,6 +59,11 @@ def ensemble_dg(
     Returns:
         dG_ens (kcal/mol): ensemble free energy = -RT ln(Q)
         pair_probs (ndarray, shape (n, n)): prob that positions i-j are paired
+
+    Salt correction: ``sodium_M`` and ``magnesium_M`` apply NUPACK-compatible
+    per-base-pair ΔG shift (Owczarzy/empirical fit in
+    :func:`strider.thermo.salt.dg_per_bp_salt`).  Defaults to 1 M Na⁺ / 0 Mg²⁺
+    (the SantaLucia/Turner reference state — no correction applied).
     """
     seq = sequence.upper().replace("U", "T") if material == "dna" else sequence.upper().replace("T", "U")
     n = len(seq)
@@ -72,7 +79,10 @@ def ensemble_dg(
     for i in range(n - 1):
         Q[i][i + 1] = 1.0
 
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks=[])
+    from strider.thermo.salt import dg_per_bp_salt
+    bp_salt_factor = _boltzmann(dg_per_bp_salt(sodium_M, magnesium_M), T)
+
+    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks=[], bp_salt_factor=bp_salt_factor)
     _apply_coaxial_external(seq, Q, Qb, n, T, material)
 
     Z = Q[0][n - 1]
@@ -317,7 +327,7 @@ def _fill_dp(seq, Q, Qb, QM, n, T, pairs, material):
     _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks=[])
 
 
-def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list):
+def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list, bp_salt_factor: float = 1.0):
     """
     Nick-aware McCaskill DP.
 
@@ -326,6 +336,11 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list):
       Qb[i][j] — same, with i and j forced to be paired
       QM[i][j] — multi-loop partial partition function (≥ 1 stem; pays ML_PAIR
                  per stem and ML_BASE per unpaired base)
+
+    ``bp_salt_factor`` is the per-base-pair Boltzmann factor for the salt
+    correction (= exp(-ΔG_per_bp/RT)).  Multiplied into Qb[i][j] once per
+    closed pair so the correction is automatically ensemble-weighted by the
+    pair probability.  Defaults to 1.0 (no correction, 1 M Na⁺ reference).
     """
     if material == "dna":
         from strider.thermo.parameters_dna import ML_INIT, ML_PAIR, ML_BASE, DANGLE_3, DANGLE_5
@@ -344,7 +359,7 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list):
             if _can_pair_nicks(seq, i, j, pairs, nicks):
                 Qb[i][j] = _qb_val(
                     seq, i, j, Q, Qb, QM, T, pairs, material, nicks, bm_ml_init_pair
-                )
+                ) * bp_salt_factor
 
             # ── QM[i][j] ──────────────────────────────────────────────────────
             # Single stem (i,j)
@@ -391,15 +406,24 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list):
 
 def _apply_coaxial_external(seq: str, Q: np.ndarray, Qb: np.ndarray, n: int, T: float, material: str) -> None:
     """
-    Recompute Q[0][j] under the Mathews-Turner stacking-ensemble decoration
-    model on the external loop (per-helix sum of NONE / D5 / D3 / TM states;
-    Mathews et al. 1999; Lu, Turner & Mathews 2006).
+    Recompute Q[0][j] under NUPACK's external-loop dangle decoration model.
+
+    Each end of each external-loop stem decorates *independently*: an unpaired
+    flanking base contributes (1 + boltz(dangle)) on its end, so a stem with
+    both flanks unpaired has decoration factor
+        Z_dec = (1 + boltz(d5)) * (1 + boltz(d3))
+            = 1 + boltz(d5) + boltz(d3) + boltz(d5)*boltz(d3)
+    The cross term boltz(d5)*boltz(d3) is exactly what STK_TM_DELTA stores
+    (verified: every entry of STK_TM_DELTA equals STK_D5_DELTA * STK_D3_DELTA
+    at the same key), so the multiplicative-Z form and the per-state-sum form
+    are algebraically identical.  Verified empirically against NUPACK
+    structure_energy probes (scratch/tm_formula_test.py).
 
     Single-pass DP Q_stk[j] where each stem (k,j) contributes:
       NONE:  left   * STK_BARE_FACTOR[xy] * Qb[k][j]
-      D5:    left5  * STK_D5_DELTA[xyn5]  * Qb[k][j]     (additive above bare)
+      D5:    left5  * STK_D5_DELTA[xyn5]  * Qb[k][j]
       D3:    left   * STK_D3_DELTA[myx]   * Qb[k][j-1]   (stem is (k,j-1))
-      TM:    left5  * STK_TM_DELTA[n5xym] * Qb[k][j-1]   (residual above d5+d3)
+      TM:    left5  * STK_TM_DELTA[n5xym] * Qb[k][j-1]   (= D5*D3 cross term)
       COAX:  QRIGHT[k-1][b] * (bm_coax - bare_left*bare_right) * Qb[k][j]
         (flush coaxial stacking; Walter et al. 1994 PNAS 91:9218-9222)
 
@@ -445,7 +469,7 @@ def _apply_coaxial_external(seq: str, Q: np.ndarray, Qb: np.ndarray, n: int, T: 
                 if k > 0:
                     tm_delta = STK_TM_DELTA.get(seq[k - 1] + seq[k] + seq[j - 1] + seq[j], 0.0)
                     if tm_delta != 0.0:
-                        Q_stk[j] += left5 * tm_delta * Qb[k][j - 1]  # TM residual
+                        Q_stk[j] += left5 * tm_delta * Qb[k][j - 1]  # D5*D3 cross term
 
         # Update QRIGHT for downstream coaxial corrections.
         for m in range(j + 1):
@@ -615,6 +639,8 @@ def multistrand_pairs(
     sequences: list[str],
     celsius: float = 37.0,
     material: str = "dna",
+    sodium_M: float = 1.0,
+    magnesium_M: float = 0.0,
 ) -> tuple[float, np.ndarray]:
     """
     Ensemble free energy and pair-probability matrix for a multi-strand complex.
@@ -644,7 +670,10 @@ def multistrand_pairs(
     for i in range(n - 1):
         Q[i][i + 1] = 1.0
 
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks)
+    from strider.thermo.salt import dg_per_bp_salt
+    bp_salt_factor = _boltzmann(dg_per_bp_salt(sodium_M, magnesium_M), T)
+
+    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks, bp_salt_factor=bp_salt_factor)
     _apply_coaxial_external(seq, Q, Qb, n, T, material)
 
     Z = Q[0][n - 1]
@@ -660,11 +689,13 @@ def bimolecular_dg(
     seq2: str,
     celsius: float = 37.0,
     material: str = "dna",
+    sodium_M: float = 1.0,
+    magnesium_M: float = 0.0,
 ) -> float:
     """Binding ΔG° for a two-strand complex: ΔG(complex) − ΔG(seq1) − ΔG(seq2)."""
-    dG1, _ = ensemble_dg(seq1, celsius, material)
-    dG2, _ = ensemble_dg(seq2, celsius, material)
-    dG_complex = _multistrand_dg([seq1, seq2], celsius, material)
+    dG1, _ = ensemble_dg(seq1, celsius, material, sodium_M, magnesium_M)
+    dG2, _ = ensemble_dg(seq2, celsius, material, sodium_M, magnesium_M)
+    dG_complex = _multistrand_dg([seq1, seq2], celsius, material, sodium_M, magnesium_M)
     return dG_complex - dG1 - dG2
 
 
@@ -672,6 +703,8 @@ def _multistrand_dg(
     sequences: list[str],
     celsius: float,
     material: str,
+    sodium_M: float = 1.0,
+    magnesium_M: float = 0.0,
 ) -> float:
     """
     Ensemble ΔG for the concatenated multi-strand complex (kcal/mol).
@@ -698,7 +731,10 @@ def _multistrand_dg(
     for i in range(n - 1):
         Q[i][i + 1] = 1.0
 
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks)
+    from strider.thermo.salt import dg_per_bp_salt
+    bp_salt_factor = _boltzmann(dg_per_bp_salt(sodium_M, magnesium_M), T)
+
+    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks, bp_salt_factor=bp_salt_factor)
     _apply_coaxial_external(seq, Q, Qb, n, T, material)
 
     Z = Q[0][n - 1]

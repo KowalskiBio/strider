@@ -29,6 +29,9 @@ Homepage   = "https://github.com/EmilioVenegas/strider"
 Repository = "https://github.com/EmilioVenegas/strider"
 Issues     = "https://github.com/EmilioVenegas/strider/issues"
 
+[project.scripts]
+strider = "strider.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["strider*"]
 

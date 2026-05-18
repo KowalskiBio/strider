@@ -132,6 +132,31 @@ class ThermoEngine:
             self.cache.set(key, result)
         return result
 
+    def sample(
+        self,
+        sequence: str,
+        n_samples: int,
+        seed: int | None = None,
+    ) -> list[tuple[str, list[tuple[int, int]]]]:
+        """Draw ``n_samples`` Boltzmann-distributed structures for a single strand."""
+        from strider.structure.sampling import sample_structures
+        return sample_structures(
+            sequence, n_samples, celsius=self.celsius, material=self.material, seed=seed,
+        )
+
+    def subopt(
+        self,
+        sequence: str,
+        gap: float = 1.0,
+        max_structures: int = 200,
+    ) -> list[tuple[str, float, list[tuple[int, int]]]]:
+        """Enumerate suboptimal structures within ``gap`` kcal/mol of the MFE."""
+        from strider.structure.sampling import subopt_structures
+        return subopt_structures(
+            sequence, gap=gap, celsius=self.celsius, material=self.material,
+            max_structures=max_structures,
+        )
+
     def pairs(self, *sequences: str) -> np.ndarray:
         """Pair-probability matrix P[i,j] for the given (multi-)strand complex."""
         return self.pfunc(*sequences).pair_probs
@@ -295,13 +320,27 @@ class ThermoEngine:
         """Partition function via the built-in McCaskill DP (single- or multi-strand)."""
         if len(sequences) == 1:
             from strider.thermo.ensemble import ensemble_dg
-            dG, probs = ensemble_dg(sequences[0], self.celsius, self.material)
+            dG, probs = ensemble_dg(
+                sequences[0], self.celsius, self.material,
+                self.sodium, self.magnesium,
+            )
         else:
             # Multi-strand: nick-aware McCaskill DP on concatenated sequence.
             # Returns ensemble ΔG of the complex (not the binding ΔG).
             # engine.ddg() subtracts individual strand energies to get ΔΔG.
             from strider.thermo.ensemble import multistrand_pairs
-            dG, probs = multistrand_pairs(list(sequences), self.celsius, self.material)
+            from strider.equilibrium import cyclic_symmetry
+            dG, probs = multistrand_pairs(
+                list(sequences), self.celsius, self.material,
+                self.sodium, self.magnesium,
+            )
+            # Rotational-symmetry correction: the nick-aware DP is for the
+            # *ordered* concatenation, so a homomeric complex over-counts by
+            # σ.  NUPACK applies the same correction internally; we apply it
+            # here so every backend reports a comparable species-level ΔG.
+            sigma = cyclic_symmetry(list(sequences))
+            if sigma > 1:
+                dG += R * (self.celsius + 273.15) * math.log(sigma)
 
         Z = math.exp(-dG / (R * (self.celsius + 273.15)))
         return PFuncResult(free_energy=dG, partition_function=Z, pair_probs=probs)
