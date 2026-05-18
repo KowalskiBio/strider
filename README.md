@@ -1341,16 +1341,22 @@ The primary validation example. Demonstrates the complete pipeline:
 
 The native backend uses strider's own McCaskill O(n³) partition-function DP with nick-aware recursions for multi-strand complexes — the same family of algorithm as ViennaRNA (RNAcofold) and NUPACK. NUPACK output is auto-shifted to the 1 M standard state (matching the SantaLucia / Turner convention) and the multi-strand pfunc applies the σ rotational correction internally, so engine output is consistent across backends.
 
-| Calculation | Native | ViennaRNA | NUPACK | Gap (native vs NUPACK) |
-|---|---|---|---|---|
-| ΔG(R1): miR21 + H1 → miR21·H1 (bimolecular) | −11.54 | −11.38 | −11.42 | **0.1 kcal/mol** |
-| ΔG(H1): hairpin ensemble (12 nt, Na⁺=0.137, Mg²⁺=0.01) | −3.13 | — | −3.12 | **0.01 kcal/mol** |
-| ΔG(GC hairpin, 16 nt) | −7.36 | — | −7.35 | **0.01 kcal/mol** |
-| ΔG(spont): H1 + H2 → H1·H2 (long multi-loop) | −13.3 | −22.8 | −23.4 | 10 kcal/mol |
+All numbers below at physiological salt (Na⁺=0.137 M, Mg²⁺=0.01 M, the engine default).
 
-**Where the native backend matches well:** bimolecular toehold binding (~0.1 kcal/mol) and **single hairpins under physiological salt** (mean bias −0.002 kcal/mol, max 0.03 kcal/mol on the cases pinned by `tests/test_native_vs_nupack_accuracy.py`). Concentration-solver round-trips agree with NUPACK `tube_analysis` to ~1 %.
+| Calculation | Native | NUPACK | Gap |
+|---|---|---|---|
+| Single hairpin ΔG (12 nt) | −3.13 | −3.12 | **0.01 kcal/mol** |
+| Single hairpin ΔG (16 nt GC stem) | −7.36 | −7.35 | **0.01 kcal/mol** |
+| Bimolecular short duplex (20 nt total) | −14.80 | −13.36 | 1.4 kcal/mol |
+| Bimolecular exact-complement (24 nt total) | −14.13 | −12.67 | 1.5 kcal/mol |
+| Bimolecular partial-complement (67 nt total) | −21.88 | −22.23 | 0.4 kcal/mol |
+| ΔG(spont): H1 + H2 → H1·H2 (106 nt complex) | −54.00 | −52.38 | 1.6 kcal/mol |
 
-**Where it diverges:** long multi-loop / coaxial topologies (10+ kcal/mol gaps on stacked-multiloop complexes). For those, use `vienna` or `nupack`. An earlier 0.15–0.50 kcal/mol systematic over-stabilization on hairpins came from a missing per-base-pair salt correction in the McCaskill DP, now wired in via `strider.thermo.salt.dg_per_bp_salt` (see [Salt corrections](#salt-corrections)).
+**Where the native backend matches well:** **single hairpins under physiological salt** (mean bias −0.002 kcal/mol, max 0.03 kcal/mol on the cases pinned by `tests/test_native_vs_nupack_accuracy.py`). Concentration-solver round-trips agree with NUPACK `tube_analysis` to ~1 %.
+
+**Where it diverges:** multi-strand complexes, where native over-stabilizes by ~0.4–1.6 kcal/mol depending on the topology. The residual is small enough for design-iteration use but matters for absolute affinity predictions — prefer `nupack` (or `vienna` for single-strand MFE) for publication numbers.
+
+**History:** an earlier 0.15–0.50 kcal/mol systematic over-stabilization on *single hairpins* came from a missing per-base-pair salt correction in the McCaskill DP, now wired in via `strider.thermo.salt.dg_per_bp_salt` (see [Salt corrections](#salt-corrections)). A previously documented 10 kcal/mol multi-loop gap was also a pre-fix artifact and no longer applies.
 
 **When to use each backend:**
 
