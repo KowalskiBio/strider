@@ -19,6 +19,7 @@ import numpy as np
 if TYPE_CHECKING:
     from strider.sweep.cache import DiskCache
     from strider.thermo.modified import ModificationSite
+    from strider.thermo.parameters import ParameterSet
 
 BackendName = Literal["auto", "native", "vienna"]
 
@@ -66,6 +67,7 @@ class ThermoEngine:
         backend: BackendName = "auto",
         cache: "DiskCache | None" = None,
         correction_model: Callable[[str], float] | None = None,
+        parameter_set: "str | ParameterSet | None" = None,
     ) -> None:
         self.material = material
         self.celsius = celsius
@@ -74,6 +76,32 @@ class ThermoEngine:
         self.cache = cache
         self.correction_model = correction_model
         self._backend = self._resolve_backend(backend)
+        self._parameter_set_arg = parameter_set
+        self._params_cache: "ParameterSet | None" = None
+
+    @property
+    def params(self) -> "ParameterSet":
+        """
+        Lazily-loaded :class:`ParameterSet` for this engine.
+
+        Selection order:
+          1. explicit ``parameter_set`` argument (string name or instance)
+          2. ``"native-rna"`` / ``"native-dna"`` matching ``self.material``
+        """
+        if self._params_cache is not None:
+            return self._params_cache
+
+        from strider.thermo.parameters import ParameterSet, load_parameters
+
+        arg = self._parameter_set_arg
+        if isinstance(arg, ParameterSet):
+            self._params_cache = arg
+        elif isinstance(arg, str):
+            self._params_cache = load_parameters(arg)
+        else:
+            default = "native-rna" if self.material == "rna" else "native-dna"
+            self._params_cache = load_parameters(default)
+        return self._params_cache
 
     # ─── public API ──────────────────────────────────────────────────────────
 
@@ -325,8 +353,8 @@ class ThermoEngine:
                 self.sodium, self.magnesium,
             )
             # Rotational-symmetry correction: the nick-aware DP is for the
-            # *ordered* concatenation, so a homomeric complex over-counts by
-            # σ.  The σ correction follows Dirks et al. (2007) SIAM Review 49:65-88.
+            # *ordered* concatenation, so a homomeric complex over-counts by σ.
+            # The σ correction follows Dirks et al. (2007) SIAM Review 49:65-88.
             sigma = cyclic_symmetry(list(sequences))
             if sigma > 1:
                 dG += R * (self.celsius + 273.15) * math.log(sigma)
@@ -388,14 +416,29 @@ class ThermoEngine:
         return "native"
 
     def _cache_key(self, op: str, sequences: tuple[str, ...]) -> str:
-        """Build a SHA-256 cache key from the operation, conditions, and sequence content."""
-        raw = f"{op}|{self.material}|{self.celsius}|{self.sodium}|{self.magnesium}|{'|'.join(sequences)}"
+        """Build a SHA-256 cache key from the operation, conditions, parameter set, and sequence content."""
+        # Resolve parameter-set name without forcing a load if no override is set.
+        ps_arg = self._parameter_set_arg
+        if ps_arg is None:
+            ps_name = "default"
+        elif isinstance(ps_arg, str):
+            ps_name = ps_arg
+        else:  # ParameterSet instance
+            ps_name = getattr(ps_arg, "name", "custom")
+        raw = (
+            f"{op}|{self.material}|{self.celsius}|{self.sodium}|{self.magnesium}|"
+            f"{ps_name}|{'|'.join(sequences)}"
+        )
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def __repr__(self) -> str:
+        ps_arg = self._parameter_set_arg
+        ps_name = ps_arg if isinstance(ps_arg, str) else getattr(ps_arg, "name", None)
+        ps_part = f", parameter_set={ps_name!r}" if ps_name else ""
         return (
             f"ThermoEngine(material={self.material!r}, celsius={self.celsius}, "
-            f"sodium={self.sodium}, magnesium={self.magnesium}, backend={self._backend!r})"
+            f"sodium={self.sodium}, magnesium={self.magnesium}, "
+            f"backend={self._backend!r}{ps_part})"
         )
 
 

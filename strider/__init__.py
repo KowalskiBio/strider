@@ -29,6 +29,9 @@ from strider.thermo.nn_dna import (
 )
 from strider.thermo.salt import owczarzy_tm_correction
 from strider.thermo.modified import ModificationSite, apply_modifications
+from strider.thermo.parameters import (
+    ParameterSet, load_parameters, list_parameter_sets, param_search_paths,
+)
 
 from strider.structure.mfe import fold_mfe
 from strider.structure.sampling import sample_structures, subopt_structures
@@ -99,6 +102,7 @@ __all__ = [
     "duplex_dg", "melting_temperature", "reverse_complement", "is_self_complementary",
     "owczarzy_tm_correction",
     "ModificationSite", "apply_modifications",
+    "ParameterSet", "load_parameters", "list_parameter_sets", "param_search_paths",
     # Structure
     "fold_mfe", "fold_pseudoknot", "sample_structures", "subopt_structures",
     "parse_pairs", "to_dot_bracket", "validate",
