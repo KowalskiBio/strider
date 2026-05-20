@@ -103,6 +103,25 @@ class ThermoEngine:
             self._params_cache = load_parameters(default)
         return self._params_cache
 
+    def _uses_custom_params(self) -> bool:
+        """
+        True iff the user supplied a non-default parameter set.
+
+        The default (``parameter_set=None`` or one of ``"native"`` /
+        ``"native-dna"`` / ``"native-rna"``) leaves the energy DP reading
+        the module-level constants in :mod:`strider.thermo.parameters_dna`
+        / :mod:`strider.thermo.parameters_rna` — numerically identical to
+        every prior release.  Only an *explicit* non-native paramset
+        opens the override channel; this keeps default behaviour
+        bit-identical and bounds the blast radius of the override path.
+        """
+        arg = self._parameter_set_arg
+        if arg is None:
+            return False
+        if isinstance(arg, str):
+            return arg not in ("native", "native-dna", "native-rna")
+        return True
+
     # ─── public API ──────────────────────────────────────────────────────────
 
     @property
@@ -330,12 +349,22 @@ class ThermoEngine:
     def _mfe_native(self, sequences: tuple[str, ...]) -> MFEResult:
         """MFE via the built-in Zuker-style DP (strider.structure.mfe)."""
         from strider.structure.mfe import fold_mfe
+        from strider.thermo._param_context import param_context
         seq = _concat(sequences)
-        structure, energy, pairs = fold_mfe(seq, self.celsius, self.material)
+        override = self.params if self._uses_custom_params() else None
+        with param_context(override):
+            structure, energy, pairs = fold_mfe(seq, self.celsius, self.material)
         return MFEResult(energy=energy, structure=structure, base_pairs=pairs, sequence=seq)
 
     def _pfunc_native(self, sequences: tuple[str, ...]) -> PFuncResult:
         """Partition function via the built-in McCaskill DP (single- or multi-strand)."""
+        from strider.thermo._param_context import param_context
+        override = self.params if self._uses_custom_params() else None
+        with param_context(override):
+            return self._pfunc_native_inner(sequences)
+
+    def _pfunc_native_inner(self, sequences: tuple[str, ...]) -> PFuncResult:
+        """Body of :meth:`_pfunc_native`; called inside the override context."""
         if len(sequences) == 1:
             from strider.thermo.ensemble import ensemble_dg
             dG, probs = ensemble_dg(

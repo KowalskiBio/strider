@@ -113,6 +113,7 @@ def _hairpin_loop_energy(seq: str, i: int, j: int, material: str, T: float) -> f
     if loop_size < 3:
         return INF
 
+    from strider.thermo._param_context import lookup_scalar, lookup_table
     if material == "dna":
         from strider.thermo.parameters_dna import (
             HAIRPIN_SIZE, LOG_LOOP_PENALTY, HAIRPIN_MISMATCH,
@@ -125,6 +126,10 @@ def _hairpin_loop_energy(seq: str, i: int, j: int, material: str, T: float) -> f
             TERMINAL_PENALTY, HAIRPIN_TRILOOP, HAIRPIN_TETRALOOP,
         )
         mismatch_table = TERMINAL_MISMATCH
+
+    HAIRPIN_SIZE = lookup_table("hairpin_size", HAIRPIN_SIZE)
+    LOG_LOOP_PENALTY = lookup_scalar("log_loop_penalty", LOG_LOOP_PENALTY)
+    TERMINAL_PENALTY = lookup_table("terminal_penalty", TERMINAL_PENALTY)
 
     # Base size: hairpin_size table is indexed by loop_size - 1.
     size_idx = loop_size - 1
@@ -167,13 +172,14 @@ def _stack_energy(seq: str, i: int, j: int, material: str) -> float:
     Key: seq[i] + seq[i+1] + seq[j-1] + seq[j]
         (canonical NN-stack convention, SantaLucia 1998 PNAS 95:1460-1465).
     """
+    from strider.thermo._param_context import lookup_table
     key = seq[i] + seq[i + 1] + seq[j - 1] + seq[j]
     if material == "dna":
         from strider.thermo.parameters_dna import STACK
-        return STACK.get(key, -1.5)
+        return lookup_table("stack", STACK).get(key, -1.5)
     else:
         from strider.thermo.parameters_rna import STACK
-        return STACK.get(key, -2.0)
+        return lookup_table("stack", STACK).get(key, -2.0)
 
 
 def _interior_bulge_energy(
@@ -191,6 +197,7 @@ def _interior_bulge_energy(
         dG_strider = TP_outer + dG_nn - TP_inner
     where dG_nn is the standard nearest-neighbor interior-loop energy.
     """
+    from strider.thermo._param_context import lookup_scalar, lookup_table
     if material == "dna":
         from strider.thermo.parameters_dna import (
             BULGE_SIZE, INTERIOR_SIZE, LOG_LOOP_PENALTY,
@@ -202,6 +209,13 @@ def _interior_bulge_energy(
             BULGE_SIZE, INTERIOR_SIZE, LOG_LOOP_PENALTY,
             ASYMMETRY_NINIO, TERMINAL_PENALTY, STACK,
         )
+
+    BULGE_SIZE = lookup_table("bulge_size", BULGE_SIZE)
+    INTERIOR_SIZE = lookup_table("interior_size", INTERIOR_SIZE)
+    LOG_LOOP_PENALTY = lookup_scalar("log_loop_penalty", LOG_LOOP_PENALTY)
+    ASYMMETRY_NINIO = lookup_table("asymmetry_ninio", ASYMMETRY_NINIO)
+    TERMINAL_PENALTY = lookup_table("terminal_penalty", TERMINAL_PENALTY)
+    STACK = lookup_table("stack", STACK)
 
     TP_outer = TERMINAL_PENALTY.get(seq[i] + seq[j], 0.0)
     TP_inner = TERMINAL_PENALTY.get(seq[ip] + seq[jp], 0.0)
@@ -314,11 +328,12 @@ def _can_pair_nicks(seq: str, i: int, j: int, pairs: set, nicks: list) -> bool:
 
 def _terminal_pair_penalty(seq: str, i: int, j: int, material: str) -> float:
     """Terminal base-pair penalty at a helix terminus (SantaLucia 1998)."""
+    from strider.thermo._param_context import lookup_table
     if material == "dna":
         from strider.thermo.parameters_dna import TERMINAL_PENALTY
     else:
         from strider.thermo.parameters_rna import TERMINAL_PENALTY
-    return TERMINAL_PENALTY.get(seq[i] + seq[j], 0.0)
+    return lookup_table("terminal_penalty", TERMINAL_PENALTY).get(seq[i] + seq[j], 0.0)
 
 
 # ─── DP fill ──────────────────────────────────────────────────────────────────
@@ -342,10 +357,15 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list, bp_salt_f
     closed pair so the correction is automatically ensemble-weighted by the
     pair probability.  Defaults to 1.0 (no correction, 1 M Na⁺ reference).
     """
+    from strider.thermo._param_context import lookup_scalar
     if material == "dna":
         from strider.thermo.parameters_dna import ML_INIT, ML_PAIR, ML_BASE, DANGLE_3, DANGLE_5
     else:
         from strider.thermo.parameters_rna import ML_INIT, ML_PAIR, ML_BASE, DANGLE_3, DANGLE_5
+
+    ML_INIT = lookup_scalar("multiloop_init", ML_INIT)
+    ML_PAIR = lookup_scalar("multiloop_pair", ML_PAIR)
+    ML_BASE = lookup_scalar("multiloop_base", ML_BASE)
 
     bm_ml_pair        = _boltzmann(ML_PAIR, T)
     bm_ml_base        = _boltzmann(ML_BASE, T)

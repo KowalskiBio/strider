@@ -342,11 +342,16 @@ def _internal_bulge_energy_fn(material: str):
 
 def _multiloop_params(material: str) -> tuple[float, float, float]:
     """Multi-loop linear coefficients (a, b, c): a + b·branches + c·unpaired."""
+    from strider.thermo._param_context import lookup_scalar
     if material == "dna":
         from strider.thermo.parameters_dna import ML_INIT, ML_PAIR, ML_BASE
     else:
         from strider.thermo.parameters_rna import ML_INIT, ML_PAIR, ML_BASE
-    return float(ML_INIT), float(ML_PAIR), float(ML_BASE)
+    return (
+        lookup_scalar("multiloop_init", float(ML_INIT)),
+        lookup_scalar("multiloop_pair", float(ML_PAIR)),
+        lookup_scalar("multiloop_base", float(ML_BASE)),
+    )
 
 
 # ─── backward-compatible private API ──────────────────────────────────────────

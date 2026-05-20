@@ -166,10 +166,13 @@ def _sample_Qb(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
                 return
 
     # 4. Multiloop closed by (i, j)
+    from strider.thermo._param_context import lookup_scalar
     if material == "dna":
         from strider.thermo.parameters_dna import ML_INIT, ML_PAIR
     else:
         from strider.thermo.parameters_rna import ML_INIT, ML_PAIR
+    ML_INIT = lookup_scalar("multiloop_init", float(ML_INIT))
+    ML_PAIR = lookup_scalar("multiloop_pair", float(ML_PAIR))
     bm_ml = _boltzmann(ML_INIT + ML_PAIR, T)
     if j - i > 2:
         cum += bm_ml * QM[i + 1][j - 1]
@@ -180,10 +183,13 @@ def _sample_Qb(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
 
 def _sample_QM(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
     """Stochastic traceback through QM[i][j] (multiloop region with ≥ 1 stem)."""
+    from strider.thermo._param_context import lookup_scalar
     if material == "dna":
         from strider.thermo.parameters_dna import ML_PAIR, ML_BASE
     else:
         from strider.thermo.parameters_rna import ML_PAIR, ML_BASE
+    ML_PAIR = lookup_scalar("multiloop_pair", float(ML_PAIR))
+    ML_BASE = lookup_scalar("multiloop_base", float(ML_BASE))
     bm_ml_pair = _boltzmann(ML_PAIR, T)
     bm_ml_base = _boltzmann(ML_BASE, T)
 

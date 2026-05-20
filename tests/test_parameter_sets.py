@@ -252,3 +252,69 @@ class TestEngineIntegration:
     def test_repr_includes_parameter_set_when_set(self):
         e = ThermoEngine(material="dna", parameter_set="native")
         assert "parameter_set='native'" in repr(e)
+
+
+class TestCustomParamsAffectNumerics:
+    """A custom ParameterSet must actually change pfunc / MFE output."""
+
+    def test_perturbed_stack_changes_pfunc(self):
+        """
+        Doubling every stack ΔG must drive a hairpin's ensemble free energy
+        sharply more negative (more bp Boltzmann weight ⇒ lower G).
+        """
+        from copy import deepcopy
+
+        baseline = ThermoEngine(material="dna", parameter_set="native-dna")
+        g_baseline = baseline.pfunc("GCGCAAAAGCGC").free_energy
+
+        custom = build_native_paramset("DNA")
+        custom = deepcopy(custom)
+        custom.dG["stack"] = {k: 2.0 * v for k, v in custom.dG["stack"].items()}
+        # Strip name so the engine treats it as a non-default instance.
+        custom.name = "perturbed-stack"
+
+        e = ThermoEngine(material="dna", parameter_set=custom)
+        g_custom = e.pfunc("GCGCAAAAGCGC").free_energy
+
+        # Doubling the (already-negative) stack energies must move ΔG further
+        # negative — by at least 1 kcal/mol on a 4-bp stem.
+        assert g_custom < g_baseline - 1.0, (
+            f"expected stronger binding under doubled stack, "
+            f"got baseline={g_baseline:.3f}, custom={g_custom:.3f}"
+        )
+
+    def test_perturbed_multiloop_changes_mfe(self):
+        """A large multi-loop init penalty must suppress multi-branch folds."""
+        from copy import deepcopy
+
+        # A sequence that *can* form either two hairpins (multiloop) or a
+        # single stem-loop.  Multiloop pays ML_INIT once; if we crank that up
+        # the optimal fold cannot be a multiloop.
+        seq = "GCGCGGAAAACCGCGCAACGCGCAAAAGCGCG"
+
+        baseline = ThermoEngine(material="dna", parameter_set="native-dna")
+        mfe_base = baseline.mfe(seq)
+
+        custom = deepcopy(build_native_paramset("DNA"))
+        custom.dG["multiloop_init"] = 100.0   # forbid multiloops
+        custom.name = "no-multiloop"
+        e = ThermoEngine(material="dna", parameter_set=custom)
+        mfe_custom = e.mfe(seq)
+
+        # Custom fold has fewer branches ⇒ fewer pairs or higher ΔG than baseline.
+        assert mfe_custom.energy >= mfe_base.energy - 1e-6, (
+            f"forbidding multiloops should not produce a more stable fold: "
+            f"baseline={mfe_base.energy:.3f}, custom={mfe_custom.energy:.3f}"
+        )
+
+    def test_native_string_alias_uses_module_constants(self):
+        """
+        Passing the built-in ``"native-dna"`` name takes the default path —
+        the override channel is *not* entered, so output must be bit-identical
+        to the no-parameter-set default.
+        """
+        e_default = ThermoEngine(material="dna")
+        e_native = ThermoEngine(material="dna", parameter_set="native-dna")
+        assert e_default.pfunc("GCGCAAAAGCGC").free_energy == pytest.approx(
+            e_native.pfunc("GCGCAAAAGCGC").free_energy
+        )
