@@ -81,6 +81,9 @@ from strider.equilibrium import (
     solve_equilibrium, equilibrium_from_engine, EquilibriumResult,
     cyclic_symmetry, water_molarity,
 )
+from strider.tube import (
+    Strand, Complex, SetSpec, ComplexSet, Tube, TubeResult, tube_analysis,
+)
 
 from strider.dsd import DSDCompiler
 
@@ -126,6 +129,9 @@ __all__ = [
     # Equilibrium
     "solve_equilibrium", "equilibrium_from_engine", "EquilibriumResult",
     "cyclic_symmetry", "water_molarity",
+    # Tube / multi-strand analysis
+    "Strand", "Complex", "SetSpec", "ComplexSet", "Tube", "TubeResult",
+    "tube_analysis",
     # DSD
     "DSDCompiler",
     # Circuit templates

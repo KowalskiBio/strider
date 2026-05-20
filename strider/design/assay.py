@@ -40,30 +40,101 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from strider.tube import Complex
+
 if TYPE_CHECKING:
     from strider.thermo.engine import ThermoEngine
     from strider.design.objective import DesignObjective
 
 
-@dataclass
 class Assembly:
     """
     A multi-strand complex specification used inside an :class:`Assay`.
 
+    Composes a :class:`strider.tube.Complex` with the design metadata that
+    only exists at design-spec time (target dot-bracket structure, intended
+    equilibrium concentration).  At construction the strand identifiers are
+    stored as a name-only :class:`Complex` because sequences are not yet
+    known; the designer resolves them at evaluation time by calling
+    ``engine.ensemble_defect(sequences, structure)``.
+
+    Constructors
+    ------------
+    The original keyword-positional signature is preserved::
+
+        Assembly("H_H", ["H", "H"], structure=None, concentration=1e-6)
+
+    Or build from a :class:`Complex` directly via :meth:`from_complex`::
+
+        Assembly.from_complex(
+            Complex.from_names(["H"], name="hairpin"),
+            structure="((((....))))",
+            concentration=1e-7,
+        )
+
     Attributes
     ----------
-    name          : human-readable label (used in objective breakdowns).
-    strands       : ordered list of strand names that form the assembly.
-    structure     : optional dot-bracket target.  Required for on-targets
-                    (the ensemble-defect computation needs a target).  For
-                    off-targets, leave ``None``.
-    concentration : intended equilibrium concentration (M).  Used as a
-                    weighting factor when summing per-assembly defects.
+    complex       : the underlying :class:`Complex` (always name-only).
+    structure     : optional dot-bracket target (None for off-targets).
+    concentration : intended equilibrium concentration (M).
     """
-    name: str
-    strands: list[str]
-    structure: str | None = None
-    concentration: float = 1e-6
+
+    __slots__ = ("complex", "structure", "concentration")
+
+    def __init__(
+        self,
+        name: str,
+        strands: list[str],
+        structure: str | None = None,
+        concentration: float = 1e-6,
+    ) -> None:
+        self.complex = Complex.from_names(list(strands), name=name)
+        self.structure = structure
+        self.concentration = concentration
+
+    @classmethod
+    def from_complex(
+        cls,
+        complex: Complex,
+        structure: str | None = None,
+        concentration: float = 1e-6,
+    ) -> "Assembly":
+        """Build an :class:`Assembly` around an existing :class:`Complex`."""
+        obj = cls.__new__(cls)
+        obj.complex = complex
+        obj.structure = structure
+        obj.concentration = concentration
+        return obj
+
+    # ─── backward-compatible attribute surface ────────────────────────────────
+
+    @property
+    def name(self) -> str:
+        """Assembly identifier (mirrors ``complex.canonical_name``)."""
+        return self.complex.canonical_name
+
+    @property
+    def strands(self) -> list[str]:
+        """Ordered strand-name list (kept as ``list[str]`` for backward compat)."""
+        return list(self.complex.strand_names)
+
+    def __repr__(self) -> str:
+        return (
+            f"Assembly(name={self.name!r}, strands={self.strands!r}, "
+            f"structure={self.structure!r}, concentration={self.concentration})"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Assembly):
+            return NotImplemented
+        return (
+            self.complex == other.complex
+            and self.structure == other.structure
+            and self.concentration == other.concentration
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.complex, self.structure, self.concentration))
 
 
 @dataclass

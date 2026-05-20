@@ -94,7 +94,7 @@ def cyclic_symmetry(strand_list: list[str]) -> int:
 def water_molarity(celsius: float = 37.0) -> float:
     """Molar concentration of pure water at a given temperature (mol/L).
 
-    Uses the same polynomial as NUPACK (Lide 2008, CRC Handbook):
+    Polynomial fit from Lide (2008) CRC Handbook of Chemistry and Physics:
         ρ = 0.99987 + 6.69e-5·T − 8.96e-6·T²  (g/mL)
     divided by molar mass 18.015 g/mol.  At 25 °C → 55.34, at 37 °C → 55.13.
     """
@@ -140,15 +140,15 @@ def solve_equilibrium(
     logQ = np.zeros(n_c)
     RT = R * (celsius + 273.15)
 
-    # Standard-state conversion: if input ΔG is at c0 (e.g. NUPACK uses water
-    # molarity), shift to a 1 M reference for the solver, then scale back at
+    # Standard-state conversion: if input ΔG is at c0 (e.g. a water-molarity
+    # reference), shift to a 1 M reference for the solver, then scale back at
     # the end.  The shift is (N − 1) · ln(c0_M) per complex of N strands.
     log_c0 = math.log(standard_state_M) if standard_state_M != 1.0 else 0.0
 
     # Symmetry handling lives at the pfunc layer (the engine.pfunc method is
     # responsible for σ-correcting homomeric multi-strand complexes), so this
     # solver assumes every input ΔG already corresponds to the "species"
-    # partition function for that complex.  NUPACK behaves the same way.
+    # partition function for that complex (Dirks et al. 2007 §4).
 
     for i, name in enumerate(cx_names):
         strands, dG = complexes[name]
@@ -242,8 +242,12 @@ def equilibrium_from_engine(
     tol: float = 1e-9,
 ) -> EquilibriumResult:
     """
-    Convenience: enumerate complexes up to ``max_size`` strands, compute their
-    partition functions with ``engine``, then solve the equilibrium.
+    Convenience wrapper: enumerate complexes up to ``max_size`` strands,
+    compute their partition functions with ``engine``, then solve the
+    equilibrium.
+
+    For new code, prefer the higher-level :class:`strider.tube.Tube` API,
+    which is what this function delegates to internally.
 
     Parameters
     ----------
@@ -255,25 +259,29 @@ def equilibrium_from_engine(
                  are enumerated automatically.  Monomers are always included.
     max_size   : maximum number of strands per complex when auto-enumerating.
     """
-    from itertools import combinations_with_replacement
+    from strider.tube import ComplexSet, Complex, SetSpec, Strand, Tube
+
+    material = engine.material
+    strand_objs = {n: Strand(n, seq, material=material) for n, seq in strands.items()}
 
     if complexes is None:
-        names = list(strands.keys())
-        auto: list[tuple[str, list[str]]] = []
-        for k in range(1, max_size + 1):
-            for combo in combinations_with_replacement(names, k):
-                cname = "_".join(combo)
-                auto.append((cname, list(combo)))
-        complexes = auto
+        spec = SetSpec(max_size=max_size)
+    else:
+        explicit = [
+            Complex(strands=tuple(strand_objs[s] for s in sl), name=cname)
+            for cname, sl in complexes
+        ]
+        spec = SetSpec(max_size=0, include=explicit)
 
-    cx_map: dict[str, tuple[list[str], float]] = {}
-    for cname, sl in complexes:
-        seqs = [strands[s] for s in sl]
-        dG = engine.pfunc(*seqs).free_energy
-        cx_map[cname] = (list(sl), float(dG))
-
-    # All strider backends now report ΔG at the 1 M standard (the NUPACK
-    # backend shifts internally from its water-molarity convention).
-    return solve_equilibrium(
-        cx_map, totals, celsius=engine.celsius, tol=tol, standard_state_M=1.0,
+    tube = Tube(
+        strand_totals={strand_objs[n]: float(c) for n, c in totals.items()},
+        complexes=ComplexSet(list(strand_objs.values()), spec=spec),
+    )
+    res = tube.analyze(engine, tol=tol)
+    return EquilibriumResult(
+        concentrations=dict(res.concentrations),
+        strand_free=dict(res.strand_free),
+        converged=res.converged,
+        iterations=res.iterations,
+        residual=res.residual,
     )

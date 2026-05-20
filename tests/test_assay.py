@@ -79,6 +79,49 @@ class TestAssayPanel:
         assert [a.name for a in panel.assays] == ["a1", "a2"]
 
 
+class TestAssemblyComplexUnification:
+    """Assembly now wraps a Complex internally — verify both paths agree."""
+
+    def test_strands_property_round_trips(self):
+        a = Assembly("H_H", ["H", "H"], structure=None, concentration=1e-7)
+        assert a.strands == ["H", "H"]
+        assert a.name == "H_H"
+
+    def test_underlying_complex_is_name_only(self):
+        a = Assembly("H_H", ["H", "H"])
+        assert a.complex.is_resolved is False
+        assert a.complex.strand_names == ("H", "H")
+        assert a.complex.sigma == 2
+
+    def test_from_complex_round_trip(self):
+        from strider.tube import Complex
+        cx = Complex.from_names(["A", "B"], name="A_B")
+        a = Assembly.from_complex(cx, structure="((....))", concentration=1e-6)
+        assert a.name == "A_B"
+        assert a.strands == ["A", "B"]
+        assert a.structure == "((....))"
+        assert a.complex is cx
+
+    def test_equality(self):
+        a = Assembly("H", ["H"], "((....))", concentration=1e-7)
+        b = Assembly("H", ["H"], "((....))", concentration=1e-7)
+        assert a == b
+        assert hash(a) == hash(b)
+
+    def test_equality_differs_on_structure(self):
+        a = Assembly("H", ["H"], "((....))")
+        b = Assembly("H", ["H"], "(......)")
+        assert a != b
+
+    def test_assembly_complex_matches_tube_complex(self, engine):
+        """Assembly.complex and a Tube-side Complex with the same strand names
+        compare equal — confirming the unification."""
+        from strider.tube import Complex
+        a = Assembly("A_B", ["A", "B"])
+        cx = Complex.from_names(["A", "B"], name="A_B")
+        assert a.complex == cx
+
+
 class TestAssayIntegration:
     def test_objective_drives_designer(self, engine):
         """Wire an Assay into SequenceDesigner and verify the best sequence
