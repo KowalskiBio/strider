@@ -1,6 +1,6 @@
 # strider-dna — Nucleic Acid Thermodynamics, Kinetics, and Circuit Design
 
-[![Tests](https://img.shields.io/badge/tests-293%20passed-brightgreen)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-310%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
@@ -83,6 +83,18 @@ pip install strider-dna[full]     # all of the above
 > )
 > from strider import solve_equilibrium, sample_structures, subopt_structures
 > ```
+
+### Receipts
+
+Concrete benchmark numbers, reproducible with `python scripts/bench_accuracy.py`:
+
+| Cohort | Source | strider native |
+|---|---|---|
+| 11 canonical hairpins (Cheong 1990, Heus 1991, Antao 1991, Mathews 1999, SantaLucia 2004, Lu 2006) | published dot-brackets | mean **F-measure 0.99**, **10/11 exact match** |
+| `toehold_kf`, 0–12 nt | Zhang & Winfree 2009 Fig. 4 | **0 % relative error** |
+| MFE wall-clock | — | 20 nt ≈ 1.6 ms, 50 nt ≈ 35 ms, 100 nt ≈ 590 ms (single-thread pure Python) |
+
+The mean-F threshold is CI-enforced by `tests/test_benchmarks.py`, so accuracy regressions show up as a red test rather than as a missed claim.
 
 ---
 
@@ -1616,7 +1628,7 @@ pip install -e .[dev]
 pytest tests/ -v
 ```
 
-The test suite has **293 tests, all green** (1 skipped — a mantis-integration test when mantis-delta is not installed; 1 `slow` convergence benchmark deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
+The test suite has **310 tests, all green** (1 skipped — a mantis-integration test when mantis-delta is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
 
 | File | Tests | What is covered |
 |---|---|---|
@@ -1633,6 +1645,7 @@ The test suite has **293 tests, all green** (1 skipped — a mantis-integration 
 | `test_dsd.py` | 15 | DSDCompiler domain resolution, strand assembly, bridge integration |
 | `test_assay.py` | 14 | Assay/AssayPanel defect, off-target penalty, Assembly↔Complex unification, designer integration |
 | `test_design_convergence.py` | 15 | MutationPolicy variants, HardConstraint.propose, leaf decomposition, ensemble-defect tube objective, parallel tempering, early rejection |
+| `test_benchmarks.py` | 14 (+3 slow) | Sensitivity / PPV / F-measure metrics, canonical reference dataset, Zhang & Winfree 2009 TMSD lookup self-consistency, runner outputs above the published thresholds |
 | `test_formats.py` | 7 | Vienna, CT, BPSEQ, FASTA, oxDNA output; round-trip pair parsing |
 | `test_leakage.py` | 5 | LeakageEnumerator pairwise enumeration, pathway classification, filter() |
 | `test_screener.py` | 6 | Off-target k-mer screening |
