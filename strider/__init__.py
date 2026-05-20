@@ -65,6 +65,13 @@ from strider.design.constraints import HardConstraint
 from strider.design.optimizer import SequenceDesigner, DomainSpec, DesignResult
 from strider.design.mutation import MutationAnalyzer, MutationProfile
 from strider.design.assay import Assay, AssayPanel, Assembly
+from strider.design.policies import (
+    MutationPolicy, RandomMutationPolicy, DefectWeightedPolicy,
+    ConstraintAwarePolicy, per_residue_defect_from_ensemble,
+)
+from strider.design.decomposition import (
+    build_strand_graph, connected_components, decompose_assays,
+)
 
 from strider.screen.offtarget import OffTargetScreener, ScreeningReport
 
@@ -120,6 +127,9 @@ __all__ = [
     "SequenceDesigner", "DomainSpec", "DesignResult",
     "MutationAnalyzer", "MutationProfile",
     "Assay", "AssayPanel", "Assembly",
+    "MutationPolicy", "RandomMutationPolicy", "DefectWeightedPolicy",
+    "ConstraintAwarePolicy", "per_residue_defect_from_ensemble",
+    "build_strand_graph", "connected_components", "decompose_assays",
     # Screening
     "OffTargetScreener", "ScreeningReport",
     # Bridge to mantis

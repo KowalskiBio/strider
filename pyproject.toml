@@ -37,6 +37,10 @@ include = ["strider*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: long-running tests skipped by default; run with `pytest -m slow`",
+]
+addopts = "-m 'not slow'"
 
 [tool.ruff]
 line-length = 100

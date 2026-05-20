@@ -25,15 +25,47 @@ class HardConstraint:
     """
     A single hard constraint on sequence content.
 
-    name : human-readable description
-    fn   : callable(strand_name, sequence) -> bool (True = satisfied)
+    name     : human-readable description.
+    fn       : callable(strand_name, sequence) -> bool (True = satisfied).
+    proposer : optional callable(name, seq, pos, rng, bases) -> base | None
+               that returns a base substitution at ``pos`` known to keep
+               the constraint satisfied.  When set, the optimizer can
+               route base-flip generation through the constraint instead
+               of relying on reject-after-the-fact filtering.
     """
     name: str
     fn: Callable[[str, str], bool]
+    proposer: Callable[..., str | None] | None = None
 
     def check(self, strand_name: str, sequence: str) -> bool:
         """Return True if this constraint is satisfied for the given strand name and sequence."""
         return self.fn(strand_name, sequence)
+
+    def propose(
+        self,
+        strand_name: str,
+        sequence: str,
+        pos: int,
+        rng,
+        bases: list[str],
+    ) -> str | None:
+        """
+        Return a base substitution at ``pos`` that satisfies this
+        constraint, or ``None`` if no constraint-aware proposer is
+        configured.  Default behaviour: tries up to 8 random bases and
+        accepts the first that passes :meth:`check`.
+        """
+        if self.proposer is not None:
+            return self.proposer(strand_name, sequence, pos, rng, bases)
+        # Generic reject-resample fallback restricted to this constraint.
+        old_base = sequence[pos]
+        candidates = [b for b in bases if b != old_base]
+        rng.shuffle(candidates)
+        for cand in candidates:
+            new_seq = sequence[:pos] + cand + sequence[pos + 1 :]
+            if self.check(strand_name, new_seq):
+                return cand
+        return None
 
     def __repr__(self) -> str:
         return f"HardConstraint({self.name!r})"

@@ -216,7 +216,8 @@ class DesignObjective:
         label: str | None = None,
     ) -> "DesignObjective":
         """
-        Penalize the NUPACK-style ensemble defect of a target dot-bracket.
+        Penalize the normalized ensemble defect of a target dot-bracket
+        (Zadeh et al. 2011, J. Comput. Chem. 32:439-452).
 
         ``strand_names`` is either a single domain name or a list of names whose
         sequences are concatenated (in order) to form the complex.  The target
@@ -237,6 +238,55 @@ class DesignObjective:
                 return engine.ensemble_defect(strands, target_structure, normalize=normalize)
             except ValueError:
                 return float("inf")
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [lbl]
+        return obj
+
+    @classmethod
+    def ensemble_defect_tube(
+        cls,
+        engine: "ThermoEngine",
+        tube_factory,
+        on_targets: list[tuple[str, str]],
+        weight: float = 1.0,
+        normalize: bool = True,
+        label: str | None = None,
+    ) -> "DesignObjective":
+        """
+        Equilibrium-weighted ensemble-defect objective.
+
+        ``tube_factory`` is a callable ``(sequences) -> Tube`` that builds
+        a fresh :class:`~strider.tube.Tube` from the current sequence
+        assignment (so :class:`~strider.tube.Strand` objects pick up the
+        latest sequences each call).  ``on_targets`` is a list of
+        ``(complex_canonical_name, target_dot_bracket)`` pairs.  Each
+        on-target contributes ``c_eq · defect(target)`` to the score
+        where ``c_eq`` is the equilibrium concentration of that complex
+        in the tube — so the optimiser sees the *true* weighting from
+        the equilibrium solve, not a declared design-time concentration
+        (Wolfe & Pierce 2015, J. Comput. Chem. 36:255-269 §2.2).
+        """
+        lbl = label or f"ensemble_defect_tube({len(on_targets)})"
+
+        def fn(seqs: dict[str, str]) -> float:
+            try:
+                tube = tube_factory(seqs)
+                result = tube.analyze(engine)
+            except Exception:
+                return float("inf")
+            total = 0.0
+            for cx_name, target in on_targets:
+                conc = result.concentrations.get(cx_name, 0.0)
+                if conc <= 0.0:
+                    continue
+                try:
+                    d = result.defect(cx_name, target)
+                except Exception:
+                    continue
+                total += conc * (d if normalize else d * len(target.replace("&", "").replace("+", "")))
+            return total
 
         obj = cls()
         obj._terms = [(weight, fn)]

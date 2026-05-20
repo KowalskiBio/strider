@@ -202,19 +202,126 @@ class Assay:
         engine: "ThermoEngine",
         weight: float = 1.0,
         label: str | None = None,
+        equilibrium: bool = False,
     ) -> "DesignObjective":
-        """Wrap the assay's defect computation as a :class:`DesignObjective` term."""
+        """
+        Wrap the assay's defect computation as a :class:`DesignObjective` term.
+
+        When ``equilibrium=True`` each on-target contributes ``c_eq ·
+        defect`` instead of ``c_declared · defect`` — the weighting comes
+        from a :class:`~strider.tube.Tube` equilibrium solve over the
+        union of all on-target + off-target assemblies.  This is more
+        expensive (one Newton solve per objective evaluation) but
+        captures composition shifts that the declared concentrations
+        miss.
+        """
         from strider.design.objective import DesignObjective
 
         lbl = label or f"assay({self.name})"
 
-        def fn(seqs: dict[str, str]) -> float:
-            return self.defect(seqs, engine)
+        if not equilibrium:
+            def fn(seqs: dict[str, str]) -> float:
+                return self.defect(seqs, engine)
+        else:
+            def fn(seqs: dict[str, str]) -> float:
+                return self._equilibrium_defect(seqs, engine)
 
         obj = DesignObjective()
         obj._terms = [(weight, fn)]
         obj._labels = [lbl]
         return obj
+
+    def _equilibrium_defect(
+        self,
+        sequences: dict[str, str],
+        engine: "ThermoEngine",
+    ) -> float:
+        """
+        Total assay defect under a real equilibrium solve.
+
+        Builds a :class:`~strider.tube.Tube` from every assembly's
+        declared strands (using the *highest* declared concentration per
+        strand as the strand total), calls :meth:`Tube.analyze`, and
+        weights each on-target defect by its post-equilibrium
+        concentration.  Off-target contribution mirrors :meth:`defect`
+        and stays ΔΔG-based — equilibrium concentrations of unwanted
+        complexes are already implicit in the on-target weight loss.
+        """
+        from strider.tube import Strand, ComplexSet, SetSpec, Tube
+
+        # Build strand objects from the current sequence assignment.
+        strand_names: set[str] = set()
+        for asm in list(self.on_targets) + list(self.off_targets):
+            strand_names.update(asm.strands)
+        if not strand_names.issubset(sequences):
+            return self.defect(sequences, engine)
+
+        strand_objs = {
+            n: Strand(name=n, sequence=sequences[n], material=engine.material)
+            for n in strand_names
+        }
+
+        # Per-strand total: max concentration declared by any assembly that uses it.
+        totals: dict[str, float] = {n: 0.0 for n in strand_names}
+        for asm in self.on_targets + self.off_targets:
+            for sn in asm.strands:
+                totals[sn] = max(totals[sn], asm.concentration)
+        # Guard against all-zero totals (e.g. off-only assays).
+        for n in totals:
+            if totals[n] <= 0.0:
+                totals[n] = 1e-6
+
+        strand_totals = {strand_objs[n]: totals[n] for n in strand_names}
+
+        # Compose the complex set: every declared on/off assembly, no auto-enumeration.
+        includes = []
+        from strider.tube import Complex
+        for asm in self.on_targets + self.off_targets:
+            includes.append(
+                Complex(
+                    strands=tuple(strand_objs[n] for n in asm.strands),
+                    name=asm.name,
+                )
+            )
+        spec = SetSpec(max_size=1, include=includes)
+        cset = ComplexSet(list(strand_objs.values()), spec=spec)
+        tube = Tube(strand_totals=strand_totals, complexes=cset, name=self.name)
+
+        try:
+            result = tube.analyze(engine)
+        except Exception:
+            return self.defect(sequences, engine)
+
+        total = 0.0
+        for asm in self.on_targets:
+            if not asm.structure:
+                continue
+            conc = result.concentrations.get(asm.name, 0.0)
+            if conc <= 0.0:
+                continue
+            try:
+                d = result.defect(asm.name, asm.structure)
+            except Exception:
+                continue
+            total += d * conc
+
+        # Off-target ΔΔG penalty re-uses the declarative branch.
+        for asm in self.off_targets:
+            try:
+                strands = tuple(sequences[s] for s in asm.strands)
+            except KeyError:
+                continue
+            if len(strands) < 2:
+                continue
+            try:
+                ddg = engine.ddg(list(strands), [list(strands)])
+            except Exception:
+                continue
+            if ddg < self.off_target_ddg_threshold:
+                gap = self.off_target_ddg_threshold - ddg
+                total += self.off_target_penalty_weight * gap * gap
+
+        return total
 
 
 @dataclass
