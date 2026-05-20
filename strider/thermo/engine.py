@@ -2,9 +2,8 @@
 ThermoEngine — central dispatch for all thermodynamic calculations.
 
 Backend selection order (automatic):
-    nupack  (if installed, highest accuracy)
-    vienna  (if ViennaRNA installed, GPL, open source)
-    native  (built-in NN implementation, always available)
+    vienna  (if ViennaRNA installed, GPL, optional)
+    native  (built-in NN implementation, always available, MIT)
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
     from strider.sweep.cache import DiskCache
     from strider.thermo.modified import ModificationSite
 
-BackendName = Literal["auto", "native", "vienna", "nupack"]
+BackendName = Literal["auto", "native", "vienna"]
 
 R = 1.987e-3  # kcal / (mol · K)
 
@@ -53,7 +52,7 @@ class ThermoEngine:
     celsius  : temperature in Celsius
     sodium   : [Na+] in molar
     magnesium: [Mg2+] in molar
-    backend  : 'auto' | 'native' | 'vienna' | 'nupack'
+    backend  : 'auto' | 'native' | 'vienna'
     cache    : optional DiskCache for persistent memoization
     correction_model : optional callable(sequence) -> float for ML corrections
     """
@@ -80,7 +79,7 @@ class ThermoEngine:
 
     @property
     def backend_name(self) -> str:
-        """The active backend name: 'native', 'vienna', or 'nupack'."""
+        """The active backend name: 'native' or 'vienna'."""
         return self._backend
 
     @classmethod
@@ -90,11 +89,6 @@ class ThermoEngine:
         try:
             import RNA  # noqa: F401
             backends.append("vienna")
-        except ImportError:
-            pass
-        try:
-            import nupack  # noqa: F401
-            backends.append("nupack")
         except ImportError:
             pass
         return backends
@@ -293,16 +287,12 @@ class ThermoEngine:
 
     def _mfe_dispatch(self, sequences: tuple[str, ...]) -> MFEResult:
         """Route MFE calculation to the active backend."""
-        if self._backend == "nupack":
-            return self._mfe_nupack(sequences)
         if self._backend == "vienna":
             return self._mfe_vienna(sequences)
         return self._mfe_native(sequences)
 
     def _pfunc_dispatch(self, sequences: tuple[str, ...]) -> PFuncResult:
         """Route partition function calculation to the active backend."""
-        if self._backend == "nupack":
-            return self._pfunc_nupack(sequences)
         if self._backend == "vienna":
             return self._pfunc_vienna(sequences)
         return self._pfunc_native(sequences)
@@ -336,8 +326,7 @@ class ThermoEngine:
             )
             # Rotational-symmetry correction: the nick-aware DP is for the
             # *ordered* concatenation, so a homomeric complex over-counts by
-            # σ.  NUPACK applies the same correction internally; we apply it
-            # here so every backend reports a comparable species-level ΔG.
+            # σ.  The σ correction follows Dirks et al. (2007) SIAM Review 49:65-88.
             sigma = cyclic_symmetry(list(sequences))
             if sigma > 1:
                 dG += R * (self.celsius + 273.15) * math.log(sigma)
@@ -386,61 +375,6 @@ class ThermoEngine:
         Z = math.exp(-dG / (R * (self.celsius + 273.15)))
         return PFuncResult(free_energy=dG, partition_function=Z, pair_probs=probs)
 
-    # ─── nupack backend ───────────────────────────────────────────────────────
-
-    def _mfe_nupack(self, sequences: tuple[str, ...]) -> MFEResult:
-        """MFE via NUPACK nupack.mfe()."""
-        import nupack
-        from strider.structure.dot_bracket import parse_pairs
-        model = self._nupack_model()
-        result = nupack.mfe(list(sequences), model)
-        if result:
-            e = float(result[0].energy)
-            s = str(result[0].structure)
-            pairs = parse_pairs(s)
-            return MFEResult(energy=e, structure=s, base_pairs=pairs, sequence="".join(sequences))
-        return MFEResult(energy=0.0, structure="." * sum(len(s) for s in sequences))
-
-    def _pfunc_nupack(self, sequences: tuple[str, ...]) -> PFuncResult:
-        """
-        Partition function via NUPACK ``nupack.pfunc()``, with pair probabilities
-        via ``nupack.pairs()``.
-
-        NUPACK reports ΔG at a water-molarity standard state.  We shift to a
-        1 M reference (the convention used by strider's native backend and by
-        SantaLucia / Turner nearest-neighbor parameters) so that engine.ddg(),
-        equilibrium solvers, and detailed-balance kinetics all see consistent
-        units regardless of the backend.
-        """
-        import nupack
-        from strider.equilibrium import water_molarity
-        model = self._nupack_model()
-        pf, dG = nupack.pfunc(list(sequences), model)
-
-        # Standard-state conversion: ΔG_1M = ΔG_c0 + (N − 1) · RT · ln(c0)
-        n_strands = len(sequences)
-        if n_strands > 1:
-            c0 = water_molarity(self.celsius)
-            dG = float(dG) + (n_strands - 1) * R * (self.celsius + 273.15) * math.log(c0)
-
-        try:
-            pm = nupack.pairs(list(sequences), model)
-            probs = np.asarray(pm.to_array()) if hasattr(pm, "to_array") else np.asarray(pm)
-        except Exception:
-            n = sum(len(s) for s in sequences)
-            probs = np.zeros((n, n))
-        return PFuncResult(free_energy=float(dG), partition_function=float(pf), pair_probs=probs)
-
-    def _nupack_model(self):
-        """Build a nupack.Model from the engine's material/temperature/salt settings."""
-        import nupack
-        return nupack.Model(
-            material=self.material,
-            celsius=self.celsius,
-            sodium=self.sodium,
-            magnesium=self.magnesium,
-        )
-
     # ─── helpers ─────────────────────────────────────────────────────────────
 
     def _resolve_backend(self, backend: BackendName) -> str:
@@ -448,7 +382,7 @@ class ThermoEngine:
         if backend != "auto":
             return backend
         available = self.available_backends()
-        for preferred in ("nupack", "vienna", "native"):
+        for preferred in ("vienna", "native"):
             if preferred in available:
                 return preferred
         return "native"

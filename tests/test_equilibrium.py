@@ -140,7 +140,7 @@ class TestCyclicSymmetry:
 
 class TestSymmetryInEngine:
     """σ correction is applied at the pfunc layer (in ThermoEngine), not by
-    the solver, so that NUPACK and native backends produce comparable ΔG.
+    the solver, so every backend produces a comparable species-level ΔG.
     """
 
     def test_native_homodimer_pfunc_includes_sigma(self):

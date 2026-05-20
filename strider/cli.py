@@ -174,7 +174,7 @@ def _add_engine_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--material", choices=["dna", "rna"], default="dna")
     p.add_argument("--sodium", type=float, default=0.137, help="[Na+] in M (default 0.137)")
     p.add_argument("--magnesium", type=float, default=0.01, help="[Mg2+] in M (default 0.01)")
-    p.add_argument("--backend", choices=["auto", "native", "vienna", "nupack"],
+    p.add_argument("--backend", choices=["auto", "native", "vienna"],
                    default="native", help="thermo backend (default native)")
     p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 

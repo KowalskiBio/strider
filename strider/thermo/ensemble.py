@@ -60,10 +60,10 @@ def ensemble_dg(
         dG_ens (kcal/mol): ensemble free energy = -RT ln(Q)
         pair_probs (ndarray, shape (n, n)): prob that positions i-j are paired
 
-    Salt correction: ``sodium_M`` and ``magnesium_M`` apply NUPACK-compatible
-    per-base-pair ΔG shift (Owczarzy/empirical fit in
-    :func:`strider.thermo.salt.dg_per_bp_salt`).  Defaults to 1 M Na⁺ / 0 Mg²⁺
-    (the SantaLucia/Turner reference state — no correction applied).
+    Salt correction: ``sodium_M`` and ``magnesium_M`` apply an Owczarzy-style
+    per-base-pair ΔG shift (see :func:`strider.thermo.salt.dg_per_bp_salt`).
+    Defaults to 1 M Na⁺ / 0 Mg²⁺ — the SantaLucia/Turner reference state, at
+    which no correction is applied.
     """
     seq = sequence.upper().replace("U", "T") if material == "dna" else sequence.upper().replace("T", "U")
     n = len(seq)
@@ -406,7 +406,8 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list, bp_salt_f
 
 def _apply_coaxial_external(seq: str, Q: np.ndarray, Qb: np.ndarray, n: int, T: float, material: str) -> None:
     """
-    Recompute Q[0][j] under NUPACK's external-loop dangle decoration model.
+    Recompute Q[0][j] under the standard "all dangles" external-loop
+    decoration model (Mathews et al. 1999 §4; Lu, Turner, Mathews 2006).
 
     Each end of each external-loop stem decorates *independently*: an unpaired
     flanking base contributes (1 + boltz(dangle)) on its end, so a stem with
@@ -416,8 +417,7 @@ def _apply_coaxial_external(seq: str, Q: np.ndarray, Qb: np.ndarray, n: int, T: 
     The cross term boltz(d5)*boltz(d3) is exactly what STK_TM_DELTA stores
     (verified: every entry of STK_TM_DELTA equals STK_D5_DELTA * STK_D3_DELTA
     at the same key), so the multiplicative-Z form and the per-state-sum form
-    are algebraically identical.  Verified empirically against NUPACK
-    structure_energy probes (scratch/tm_formula_test.py).
+    are algebraically identical.
 
     Single-pass DP Q_stk[j] where each stem (k,j) contributes:
       NONE:  left   * STK_BARE_FACTOR[xy] * Qb[k][j]
@@ -577,9 +577,9 @@ def _pair_probs_outside(
 
     Implements the external context, stack propagation, and interior-loop /
     bulge propagation.  Multiloop outside contributions are not yet wired —
-    pairs inside a multiloop will be underestimated, but for hairpins and
-    bimolecular duplexes (the common design targets) this matches NUPACK
-    closely.
+    pairs inside a multiloop will be underestimated, but hairpin and
+    bimolecular-duplex pair probabilities match the canonical McCaskill
+    formulation (McCaskill 1990) closely.
     """
     Pp = np.zeros((n, n))
     if Z <= 0:

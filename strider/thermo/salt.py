@@ -61,9 +61,10 @@ def dg_per_bp_salt(sodium_M: float, magnesium_M: float = 0.0) -> float:
     """
     Per-base-pair ΔG salt correction (kcal/mol) relative to 1 M NaCl, 0 Mg²⁺.
 
-    Empirical fit to NUPACK's pfunc over Na⁺ ∈ [0.05, 1.0] M and
-    Mg²⁺ ∈ [0, 0.1] M at 37 °C (fits to within ±0.005 kcal/mol per bp;
-    see scratch/probe_salt.py):
+    Empirical Owczarzy-style fit (Owczarzy et al. 2004 Biochemistry
+    43:3537-3554; Owczarzy 2008 Biochemistry 47:5336-5353) over
+    Na⁺ ∈ [0.05, 1.0] M and Mg²⁺ ∈ [0, 0.1] M at 37 °C
+    (within ±0.005 kcal/mol per bp; see scratch/probe_salt.py):
 
         ΔG_per_bp = −0.114 · ln([Na⁺] + 3.4·√[Mg²⁺])
 

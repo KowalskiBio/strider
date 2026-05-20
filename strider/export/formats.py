@@ -16,7 +16,7 @@ def to_vienna(sequence: str, structure: str, name: str = "seq") -> str:
     """
     Vienna format: two-line header/sequence + dot-bracket.
 
-    Compatible with mfold, RNAfold, and NUPACK input.
+    Compatible with mfold, RNAfold, and most secondary-structure tools.
     """
     return f">{name}\n{sequence}\n{structure}\n"
 
