@@ -72,6 +72,14 @@ __all__ = [
 ]
 
 
+def _dict_get(table: Any, key: str) -> float | None:
+    """Safe lookup helper for the advanced-table accessors."""
+    if not isinstance(table, dict):
+        return None
+    val = table.get(key)
+    return float(val) if val is not None else None
+
+
 # ─── dataclass ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -145,6 +153,57 @@ class ParameterSet:
             float(self.dG.get("multiloop_pair", 0.0)),
             float(self.dG.get("multiloop_base", 0.0)),
         )
+
+    # ─── advanced-table accessors ────────────────────────────────────────────
+    #
+    # Every accessor is a thin convenience wrapper around ``self.dG.get(...)``.
+    # Returning ``None`` (rather than raising) signals "this parameter set
+    # does not define an override for that table" — callers fall back to the
+    # module-level constant in that case.
+
+    def dangle_5(self, key: str) -> float | None:
+        """5' dangling-end ΔG.  Key = ``base5 + close5 + close3`` (Turner 2004 §6)."""
+        return _dict_get(self.dG.get("dangle_5"), key)
+
+    def dangle_3(self, key: str) -> float | None:
+        """3' dangling-end ΔG.  Key = ``close5 + close3 + base3``."""
+        return _dict_get(self.dG.get("dangle_3"), key)
+
+    def terminal_mismatch(self, key: str) -> float | None:
+        """Terminal-mismatch ΔG at a helix end (Turner 2004 §7)."""
+        return _dict_get(self.dG.get("terminal_mismatch"), key)
+
+    def hairpin_mismatch(self, key: str) -> float | None:
+        """First-mismatch contribution at a hairpin loop's closing pair."""
+        return _dict_get(self.dG.get("hairpin_mismatch"), key)
+
+    def interior_mismatch(self, key: str) -> float | None:
+        """Mismatch contribution at each closing pair of an interior loop."""
+        return _dict_get(self.dG.get("interior_mismatch"), key)
+
+    def interior_1_1(self, key: str) -> float | None:
+        """ΔG of a 1×1 internal loop (sequence-specific)."""
+        return _dict_get(self.dG.get("interior_1_1"), key)
+
+    def interior_1_2(self, key: str) -> float | None:
+        """ΔG of a 1×2 internal loop (sequence-specific)."""
+        return _dict_get(self.dG.get("interior_1_2"), key)
+
+    def interior_2_2(self, key: str) -> float | None:
+        """ΔG of a 2×2 internal loop (sequence-specific)."""
+        return _dict_get(self.dG.get("interior_2_2"), key)
+
+    def hairpin_triloop(self, key: str) -> float | None:
+        """Sequence-specific 3-nt hairpin loop bonus (5-char key)."""
+        return _dict_get(self.dG.get("hairpin_triloop"), key)
+
+    def hairpin_tetraloop(self, key: str) -> float | None:
+        """Sequence-specific 4-nt hairpin loop bonus (6-char key)."""
+        return _dict_get(self.dG.get("hairpin_tetraloop"), key)
+
+    def coaxial_stack(self, key: str) -> float | None:
+        """Coaxial-stacking ΔG between adjacent helices (Walter et al. 1994)."""
+        return _dict_get(self.dG.get("coaxial_stack"), key)
 
     # ─── inspection ───────────────────────────────────────────────────────────
 

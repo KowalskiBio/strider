@@ -1,0 +1,27 @@
+{
+  "comment": "DNA stack table shifted by +0.115 kcal/mol per stack to approximate folding at [Na+] = 0.05 M (Owczarzy 2004 Biochemistry 43:3537-3554). Only `stack` is overridden; every other sub-table falls back to the native-dna defaults via the ParameterSet override channel.",
+  "dG": {
+    "stack": {
+      "AATT": -0.885,
+      "ACGT": -1.325,
+      "AGCT": -1.165,
+      "ATAT": -0.765,
+      "CATG": -1.335,
+      "CCGG": -1.725,
+      "CGCG": -2.055,
+      "CTAG": -1.165,
+      "GATC": -1.185,
+      "GCGC": -2.125,
+      "GGCC": -1.725,
+      "GTAC": -1.325,
+      "TATA": -0.465,
+      "TCGA": -1.185,
+      "TGCA": -1.335,
+      "TTAA": -0.885
+    }
+  },
+  "dH": {},
+  "default_wobble_pairing": false,
+  "material": "DNA",
+  "name": "dna-low-salt-50mM-Na"
+}

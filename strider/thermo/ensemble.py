@@ -130,6 +130,13 @@ def _hairpin_loop_energy(seq: str, i: int, j: int, material: str, T: float) -> f
     HAIRPIN_SIZE = lookup_table("hairpin_size", HAIRPIN_SIZE)
     LOG_LOOP_PENALTY = lookup_scalar("log_loop_penalty", LOG_LOOP_PENALTY)
     TERMINAL_PENALTY = lookup_table("terminal_penalty", TERMINAL_PENALTY)
+    HAIRPIN_TRILOOP = lookup_table("hairpin_triloop", HAIRPIN_TRILOOP)
+    HAIRPIN_TETRALOOP = lookup_table("hairpin_tetraloop", HAIRPIN_TETRALOOP)
+    # First-mismatch table follows the original DNA/RNA branch.
+    if material == "dna":
+        mismatch_table = lookup_table("hairpin_mismatch", mismatch_table)
+    else:
+        mismatch_table = lookup_table("terminal_mismatch", mismatch_table)
 
     # Base size: hairpin_size table is indexed by loop_size - 1.
     size_idx = loop_size - 1
@@ -216,6 +223,11 @@ def _interior_bulge_energy(
     ASYMMETRY_NINIO = lookup_table("asymmetry_ninio", ASYMMETRY_NINIO)
     TERMINAL_PENALTY = lookup_table("terminal_penalty", TERMINAL_PENALTY)
     STACK = lookup_table("stack", STACK)
+    if material == "dna":
+        INTERIOR_MISMATCH = lookup_table("interior_mismatch", INTERIOR_MISMATCH)
+        INTERIOR_1_1 = lookup_table("interior_1_1", INTERIOR_1_1)
+        INTERIOR_1_2 = lookup_table("interior_1_2", INTERIOR_1_2)
+        INTERIOR_2_2 = lookup_table("interior_2_2", INTERIOR_2_2)
 
     TP_outer = TERMINAL_PENALTY.get(seq[i] + seq[j], 0.0)
     TP_inner = TERMINAL_PENALTY.get(seq[ip] + seq[jp], 0.0)
@@ -357,7 +369,7 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list, bp_salt_f
     closed pair so the correction is automatically ensemble-weighted by the
     pair probability.  Defaults to 1.0 (no correction, 1 M Na⁺ reference).
     """
-    from strider.thermo._param_context import lookup_scalar
+    from strider.thermo._param_context import lookup_scalar, lookup_table
     if material == "dna":
         from strider.thermo.parameters_dna import ML_INIT, ML_PAIR, ML_BASE, DANGLE_3, DANGLE_5
     else:
@@ -366,6 +378,8 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list, bp_salt_f
     ML_INIT = lookup_scalar("multiloop_init", ML_INIT)
     ML_PAIR = lookup_scalar("multiloop_pair", ML_PAIR)
     ML_BASE = lookup_scalar("multiloop_base", ML_BASE)
+    DANGLE_5 = lookup_table("dangle_5", DANGLE_5)
+    DANGLE_3 = lookup_table("dangle_3", DANGLE_3)
 
     bm_ml_pair        = _boltzmann(ML_PAIR, T)
     bm_ml_base        = _boltzmann(ML_BASE, T)
@@ -452,10 +466,15 @@ def _apply_coaxial_external(seq: str, Q: np.ndarray, Qb: np.ndarray, n: int, T: 
     """
     if material != "dna":
         return
+    from strider.thermo._param_context import lookup_table
     from strider.thermo.parameters_dna import (
         COAXIAL_STACK,
         STK_BARE_FACTOR, STK_D5_DELTA, STK_D3_DELTA, STK_TM_DELTA,
     )
+    # STK_* tables are precomputed Boltzmann factors derived from DANGLE_5 /
+    # DANGLE_3 / TERMINAL_MISMATCH at 37 °C — they are not exposed via the
+    # ParameterSet schema, so an override is permitted only for COAXIAL_STACK.
+    COAXIAL_STACK = lookup_table("coaxial_stack", COAXIAL_STACK)
 
     BASE_LIST = ['A', 'T', 'G', 'C']
     BASE_IDX  = {'A': 0, 'T': 1, 'G': 2, 'C': 3}

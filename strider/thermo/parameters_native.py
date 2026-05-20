@@ -2,13 +2,14 @@
 Built-in MIT-licensed parameter set.
 
 Assembled from primary-literature constants — SantaLucia 2004 (DNA) and
-Mathews 1999 / Turner 2004 (RNA) — covering the minimum set of tables needed
+Mathews 1999 / Turner 2004 (RNA) — covering the full set of tables consumed
 by strider's native MFE / pfunc engines: stack, hairpin loop sizes, bulge
-loop sizes, interior loop sizes, terminal penalty, and multiloop
-coefficients.  Higher-order tables (hairpin/interior mismatch, 1×1/1×2/2×2
-interior, dangle, coaxial) are absent — code that requires them should branch
-on :meth:`ParameterSet.has` and either fall back or ask the user to supply a
-JSON parameter file via ``STRIDER_PARAMS_DIR``.
+loop sizes, interior loop sizes, terminal penalty, multiloop coefficients,
+dangles, terminal/hairpin/interior mismatches, 1×1 / 1×2 / 2×2 interior
+loops, sequence-specific triloop / tetraloop bonuses, and coaxial stacking
+(the DNA-specific advanced tables are populated for DNA and absent for
+RNA — RNA only ships dangle and terminal-mismatch tables on top of the
+common loop tables).
 """
 
 from __future__ import annotations
@@ -113,10 +114,13 @@ def build_native_paramset(material: str = "DNA") -> ParameterSet:
     """
     Construct a :class:`ParameterSet` from strider's built-in NN tables.
 
-    The result has only the subset of tables needed by the existing
-    duplex / hairpin / bulge / interior energetics — mismatch, dangle, and
-    coaxial tables are absent.  Code that needs them should branch on
-    ``params.has("dangle_5")`` etc.
+    The DNA path populates the full advanced table set (dangles, terminal
+    mismatch, hairpin mismatch, interior mismatch, interior_1_1 / 1_2 /
+    2_2, hairpin triloop / tetraloop, coaxial stacking) by referencing the
+    module-level constants in :mod:`strider.thermo.parameters_dna`.  The
+    RNA path includes the subset that primary literature defines for RNA
+    (dangles, terminal mismatch, triloop / tetraloop) — `interior_1_1`
+    and friends are DNA-only in the bundled tables.
 
     Parameters
     ----------
@@ -129,12 +133,14 @@ def build_native_paramset(material: str = "DNA") -> ParameterSet:
         hairpin = _HAIRPIN_DNA
         wobble = False
         terminal_penalty = {"AT": 0.45, "TA": 0.45}    # SantaLucia INIT_AT penalty
+        advanced = _advanced_dna_tables()
     elif material == "RNA":
         stack = _stack_dict_rna()
         stack_dH = _stack_dh_rna()
         hairpin = _HAIRPIN_RNA
         wobble = True
         terminal_penalty = {"AT": 0.45, "TA": 0.45, "GT": 0.45}  # AU/GU penalty
+        advanced = _advanced_rna_tables()
     else:
         raise ValueError(f"material must be 'DNA' or 'RNA', got {material!r}")
 
@@ -151,6 +157,7 @@ def build_native_paramset(material: str = "DNA") -> ParameterSet:
         "multiloop_base": 0.0,
         "join_penalty": 1.96,
         "log_loop_penalty": 1.07,
+        **advanced,
     }
     dH = {
         "stack": stack_dH,
@@ -170,3 +177,51 @@ def build_native_paramset(material: str = "DNA") -> ParameterSet:
         source_path=None,
         comment="strider built-in: SantaLucia 2004 (DNA) / Mathews 1999 (RNA)",
     )
+
+
+# ─── advanced-table population ────────────────────────────────────────────────
+
+
+def _advanced_dna_tables() -> dict[str, dict[str, float]]:
+    """Re-export the DNA advanced ΔG tables verbatim from the module constants."""
+    from strider.thermo.parameters_dna import (
+        DANGLE_3, DANGLE_5,
+        TERMINAL_MISMATCH, HAIRPIN_MISMATCH, INTERIOR_MISMATCH,
+        INTERIOR_1_1, INTERIOR_1_2, INTERIOR_2_2,
+        HAIRPIN_TRILOOP, HAIRPIN_TETRALOOP,
+        COAXIAL_STACK,
+    )
+    return {
+        "dangle_3": dict(DANGLE_3),
+        "dangle_5": dict(DANGLE_5),
+        "terminal_mismatch": dict(TERMINAL_MISMATCH),
+        "hairpin_mismatch": dict(HAIRPIN_MISMATCH),
+        "interior_mismatch": dict(INTERIOR_MISMATCH),
+        "interior_1_1": dict(INTERIOR_1_1),
+        "interior_1_2": dict(INTERIOR_1_2),
+        "interior_2_2": dict(INTERIOR_2_2),
+        "hairpin_triloop": dict(HAIRPIN_TRILOOP),
+        "hairpin_tetraloop": dict(HAIRPIN_TETRALOOP),
+        "coaxial_stack": dict(COAXIAL_STACK),
+    }
+
+
+def _advanced_rna_tables() -> dict[str, dict[str, float]]:
+    """
+    Re-export the RNA advanced ΔG tables.
+
+    RNA bundles only the subset that strider's RNA tables actually carry —
+    dangles, terminal mismatch, triloop / tetraloop.  Interior_1_1/2 and
+    hairpin / interior mismatch are DNA-only in the current data set.
+    """
+    from strider.thermo.parameters_rna import (
+        DANGLE_3, DANGLE_5,
+        TERMINAL_MISMATCH, HAIRPIN_TRILOOP, HAIRPIN_TETRALOOP,
+    )
+    return {
+        "dangle_3": dict(DANGLE_3),
+        "dangle_5": dict(DANGLE_5),
+        "terminal_mismatch": dict(TERMINAL_MISMATCH),
+        "hairpin_triloop": dict(HAIRPIN_TRILOOP),
+        "hairpin_tetraloop": dict(HAIRPIN_TETRALOOP),
+    }

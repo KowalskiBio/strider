@@ -1,6 +1,6 @@
 # strider-dna — Nucleic Acid Thermodynamics, Kinetics, and Circuit Design
 
-[![Tests](https://img.shields.io/badge/tests-310%20passed-brightgreen)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-315%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
@@ -1153,25 +1153,41 @@ with cache:             # context manager closes the connection
 
 ### 15. Parameter sets and custom NN tables
 
-Nearest-neighbor energies live in a swappable `ParameterSet` object. The built-in ``"native"`` set is assembled from published constants — SantaLucia 2004 (DNA) and Mathews 1999 / Turner 2004 (RNA) — and is always available. Additional Turner-schema JSON files dropped into ``$STRIDER_PARAMS_DIR`` or into `strider/thermo/parameters/` are auto-discovered by basename.
+Nearest-neighbor energies live in a swappable `ParameterSet` object. The built-in ``"native"`` set is assembled from published constants — SantaLucia 2004 (DNA) and Mathews 1999 / Turner 2004 (RNA) — and is always available. Additional Turner-schema JSON files dropped into ``$STRIDER_PARAMS_DIR`` or into `strider/thermo/parameters/` are auto-discovered by basename. Custom sets actually change the numerical output of `pfunc` / `mfe` / `sample` — the override is threaded through the energy DP, not just stamped on the cache key.
 
 ```python
 from strider import ParameterSet, load_parameters, list_parameter_sets, ThermoEngine
 
 # What's available in this environment?
-print(list_parameter_sets())          # ['native']  (or more if user supplied JSON)
+print(list_parameter_sets())          # ['native', 'dna-low-salt-50mM-Na']
+                                      # (or more if user has supplied JSON via STRIDER_PARAMS_DIR)
 
 # Inspect the native set
 p = load_parameters('native')         # = 'native-dna'; use 'native-rna' for RNA
-print(p)                              # ParameterSet(name='native-dna', material='DNA', wobble=False, keys=11)
+print(p)                              # ParameterSet(name='native-dna', material='DNA', wobble=False, keys=22)
 print(p.dG['stack']['AATT'])          # -1.0  (SantaLucia 2004)
 print(p.multiloop_params())           # (a, b, c) = Turner-style linear ML coefficients
 
-# Use a specific parameter set with the engine
-engine = ThermoEngine(material='dna', parameter_set='native')
+# Use a specific parameter set with the engine — custom sets DO change numerics.
+engine_default  = ThermoEngine(material='dna')                                # native, fast path
+engine_lowsalt  = ThermoEngine(material='dna', parameter_set='dna-low-salt-50mM-Na')
+seq = 'GCGCAAAAGCGC'
+print(engine_default.pfunc(seq).free_energy)   # -3.13 kcal/mol
+print(engine_lowsalt.pfunc(seq).free_energy)   # -2.82 kcal/mol  (destabilised by salt shift)
 ```
 
-JSON file format (`<name>.json`):
+#### Exporting + editing a parameter set
+
+```bash
+# Export the native baseline as editable JSON
+python scripts/export_paramset.py --name native-dna --rebuild-native --out my-dna.json
+# Edit my-dna.json in place, then drop it where the loader will find it:
+mv my-dna.json strider/thermo/parameters/   # OR set $STRIDER_PARAMS_DIR
+```
+
+The exporter writes every sub-table, so the result is a complete self-contained set; partial JSONs (just a couple of perturbed entries) are also valid — sub-tables not present in the JSON fall back to the module-level defaults via the per-call override channel.
+
+#### JSON file format (`<name>.json`):
 
 ```json
 {
@@ -1179,21 +1195,48 @@ JSON file format (`<name>.json`):
     "material": "DNA",
     "default_wobble_pairing": false,
     "dG": {
-        "stack":         {"AATT": -1.00, "CGCG": -2.17, ...},
-        "hairpin_size":  [99, 99, 99, 4.1, 4.3, ...],
-        "bulge_size":    [...],
-        "interior_size": [...],
-        "asymmetry_ninio": [0.4, 0.3, 0.2, 0.1, 3.0],
+        "stack":            {"AATT": -1.00, "CGCG": -2.17, "...": "..."},
+        "hairpin_size":     [99, 99, 99, 4.1, 4.3, "..."],
+        "bulge_size":       ["..."],
+        "interior_size":    ["..."],
+        "asymmetry_ninio":  [0.4, 0.3, 0.2, 0.1, 3.0],
         "terminal_penalty": {"AT": 0.45, "TA": 0.45},
-        "multiloop_init":  3.4, "multiloop_pair": 0.4, "multiloop_base": 0.0
+        "multiloop_init":   3.4, "multiloop_pair": 0.4, "multiloop_base": 0.0,
+        "dangle_5":         {"AAT": -0.5, "...": "..."},
+        "dangle_3":         {"...": "..."},
+        "terminal_mismatch":{"...": "..."},
+        "hairpin_mismatch": {"...": "..."},
+        "interior_mismatch":{"...": "..."},
+        "interior_1_1":     {"...": "..."},
+        "interior_1_2":     {"...": "..."},
+        "interior_2_2":     {"...": "..."},
+        "hairpin_triloop":  {"...": "..."},
+        "hairpin_tetraloop":{"...": "..."},
+        "coaxial_stack":    {"...": "..."}
     },
-    "dH": {"stack": {"AATT": -7.9, ...}}
+    "dH": {"stack": {"AATT": -7.9, "...": "..."}}
 }
 ```
 
-Schema reference (Turner / Mathews convention): `stack`, `hairpin_size`, `hairpin_mismatch`, `hairpin_triloop`, `hairpin_tetraloop`, `interior_size`, `interior_mismatch`, `interior_1_1`, `interior_1_2`, `interior_2_2`, `bulge_size`, `multiloop_init`, `multiloop_pair`, `multiloop_base`, `asymmetry_ninio`, `terminal_penalty`, `terminal_mismatch`, `dangle_5`, `dangle_3`, `coaxial_stack`, `join_penalty`, `log_loop_penalty`.
+**Schema reference (Turner / Mathews convention)** — all 22 sub-tables consumed by the energy DP:
 
-> **Status:** the loader and ``engine.params`` accessor are wired up today. The folding engines (`fold_mfe`, `ensemble_dg`) currently use the canonical SantaLucia/Turner constants in `strider.thermo.parameters_dna` / `parameters_rna`, which are physically identical to the ``native`` ParameterSet. Threading a user-supplied custom JSON through the energy functions is the next refactor (see the project plan).
+| Sub-table | Threaded into DP? | What it controls |
+|---|---|---|
+| `stack` | ✅ | 16 (DNA) / 16 (RNA) WC stacks; can also carry mismatch stacks |
+| `hairpin_size`, `bulge_size`, `interior_size` | ✅ | Length-indexed loop-initiation tables |
+| `asymmetry_ninio`, `log_loop_penalty` | ✅ | Loop asymmetry + log-extrapolation |
+| `terminal_penalty` | ✅ | AU/GU/AT helix-end penalty |
+| `multiloop_init/pair/base` | ✅ | Linear multiloop coefficients |
+| `join_penalty` | (cache key only) | Per-nick correction |
+| `dangle_3`, `dangle_5` | ✅ | Dangling-end ΔG |
+| `terminal_mismatch` | ✅ | Mismatch at helix end / RNA hairpin first-mismatch |
+| `hairpin_mismatch` | ✅ (DNA) | First-mismatch contribution at DNA hairpin loops |
+| `interior_mismatch` | ✅ (DNA) | Mismatch at interior loop closing pair |
+| `interior_1_1`, `interior_1_2`, `interior_2_2` | ✅ (DNA) | Sequence-specific small interior loops |
+| `hairpin_triloop`, `hairpin_tetraloop` | ✅ | Sequence-specific 3-/4-nt hairpin loop bonuses |
+| `coaxial_stack` | ✅ (DNA) | Walter et al. 1994 coaxial stacking |
+
+> **Note on the override gating.** Passing `parameter_set=None` (the default), `"native"`, `"native-dna"`, or `"native-rna"` keeps the DP on its fast path — no per-call override is installed, and numerical output is bit-identical to every prior release. Only explicit non-native names or `ParameterSet` instances activate the override channel.
 
 ---
 
@@ -1628,7 +1671,7 @@ pip install -e .[dev]
 pytest tests/ -v
 ```
 
-The test suite has **310 tests, all green** (1 skipped — a mantis-integration test when mantis-delta is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
+The test suite has **315 tests, all green** (1 skipped — a mantis-integration test when mantis-delta is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
 
 | File | Tests | What is covered |
 |---|---|---|
@@ -1639,7 +1682,7 @@ The test suite has **310 tests, all green** (1 skipped — a mantis-integration 
 | `test_sampling.py` | 11 | Boltzmann sampling distribution, subopt enumeration, energy gap correctness |
 | `test_equilibrium.py` | 17 | concentration solver convergence, σ correction, water-molarity standard state |
 | `test_tube.py` | 29 | Strand / Complex / SetSpec / ComplexSet / Tube / TubeResult / tube_analysis driver |
-| `test_parameter_sets.py` | 23 | native ParameterSet adapter, Turner-schema JSON round-trip, engine integration |
+| `test_parameter_sets.py` | 31 | native ParameterSet adapter, Turner-schema JSON round-trip, engine integration, advanced-table overrides (dangle, terminal mismatch, interior_1_1, hairpin tetraloop, coaxial stack) and the bundled `dna-low-salt-50mM-Na.json` curated set |
 | `test_circuits.py` | 20 | CheckRegistry, CHA/HCR/Translator/SeesawGate templates, custom-registry composition |
 | `test_bridge.py` | 15 | CHABridge ddg_pathway, verify() checks, CircuitBridge generic topology, mantis integration |
 | `test_dsd.py` | 15 | DSDCompiler domain resolution, strand assembly, bridge integration |

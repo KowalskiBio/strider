@@ -318,3 +318,95 @@ class TestCustomParamsAffectNumerics:
         assert e_default.pfunc("GCGCAAAAGCGC").free_energy == pytest.approx(
             e_native.pfunc("GCGCAAAAGCGC").free_energy
         )
+
+
+class TestAdvancedTableOverrides:
+    """
+    The 2026-05 schema expansion threads `dangle_3/5`, `terminal_mismatch`,
+    `hairpin_mismatch`, `interior_mismatch`, `interior_1_1/1_2/2_2`,
+    `hairpin_triloop`, `hairpin_tetraloop`, and `coaxial_stack` through
+    the energy DP.  Each test below perturbs exactly one of those tables
+    and asserts the change shows up in `pfunc` output.
+    """
+
+    @staticmethod
+    def _engine_with(material: str, table: str, transform):
+        from copy import deepcopy
+        ps = deepcopy(build_native_paramset(material.upper()))
+        if isinstance(ps.dG[table], dict):
+            ps.dG[table] = {k: transform(v) for k, v in ps.dG[table].items()}
+        else:
+            ps.dG[table] = transform(ps.dG[table])
+        ps.name = f"override-{table}"
+        return ThermoEngine(material=material, parameter_set=ps)
+
+    @staticmethod
+    def _baseline(material: str):
+        return ThermoEngine(material=material, parameter_set=f"native-{material}")
+
+    def test_hairpin_tetraloop_bonus_changes_pfunc(self):
+        # Slamming every tetraloop with a huge negative bonus should drive
+        # any hairpin sequence's ensemble ΔG much more negative.
+        seq = "GCGCAAAAGCGC"   # canonical UNCG-style hairpin
+        baseline = self._baseline("dna").pfunc(seq).free_energy
+        eng = self._engine_with("dna", "hairpin_tetraloop", lambda v: v - 5.0)
+        custom = eng.pfunc(seq).free_energy
+        assert custom < baseline - 1.0, (
+            f"big tetraloop bonus should stabilise; baseline {baseline:.2f}, custom {custom:.2f}"
+        )
+
+    def test_dangle_5_override_changes_multistrand(self):
+        # Multi-strand binding consumes external-loop dangles.  Setting
+        # every 5' dangle to a +5 kcal/mol penalty should weaken duplex
+        # formation; ΔG_complex moves toward zero (relative to baseline).
+        a, b = "GCGCAAAA", "TTTTGCGC"
+        baseline = self._baseline("dna").pfunc(a, b).free_energy
+        eng = self._engine_with("dna", "dangle_5", lambda v: 5.0)
+        custom = eng.pfunc(a, b).free_energy
+        assert custom > baseline + 0.05, (
+            f"penalised dangles should destabilise complex; "
+            f"baseline {baseline:.2f}, custom {custom:.2f}"
+        )
+
+    def test_terminal_mismatch_override_changes_pfunc(self):
+        # Override every terminal-mismatch entry by −3 kcal/mol; the
+        # contribution feeds both the RNA hairpin first-mismatch term
+        # and any duplex-end mismatch context, so the *sign* of the net
+        # ensemble shift is sequence-dependent.  The contract we enforce
+        # here is the weaker "override is consulted" one: the ΔG must
+        # change measurably from the native baseline.
+        seq = "GAUUAGCAAUC"
+        baseline = self._baseline("rna").pfunc(seq).free_energy
+        eng = self._engine_with("rna", "terminal_mismatch", lambda v: v - 3.0)
+        custom = eng.pfunc(seq).free_energy
+        assert abs(custom - baseline) > 0.2, (
+            f"terminal_mismatch override should shift ΔG measurably; "
+            f"baseline {baseline:.2f}, custom {custom:.2f}"
+        )
+
+    def test_interior_1_1_override_changes_pfunc(self):
+        # Force every 1×1 interior loop to be very stable.  A sequence
+        # with a 1×1 mismatch in the middle of an otherwise-perfect stem
+        # should see ΔG drop.
+        seq = "GCGCAACGCGC"   # forms a stem with a 1×1 mismatch on AAA / C
+        baseline = self._baseline("dna").pfunc(seq).free_energy
+        eng = self._engine_with("dna", "interior_1_1", lambda v: -10.0)
+        custom = eng.pfunc(seq).free_energy
+        assert custom < baseline - 0.05, (
+            f"stabilising 1x1 interior should lower ΔG; "
+            f"baseline {baseline:.2f}, custom {custom:.2f}"
+        )
+
+    def test_bundled_low_salt_paramset_loads_and_shifts(self):
+        """End-to-end smoke: the JSON shipped at
+        ``strider/thermo/parameters/dna-low-salt-50mM-Na.json`` loads
+        and visibly shifts pfunc relative to the native baseline."""
+        baseline = ThermoEngine(material="dna", parameter_set="native-dna")
+        low_salt = ThermoEngine(material="dna", parameter_set="dna-low-salt-50mM-Na")
+        g_b = baseline.pfunc("GCGCAAAAGCGC").free_energy
+        g_s = low_salt.pfunc("GCGCAAAAGCGC").free_energy
+        # The +0.115 kcal/mol per-stack shift across a 4-bp stem should
+        # destabilise the hairpin by at least 0.2 kcal/mol.
+        assert g_s > g_b + 0.2, (
+            f"low-salt set should destabilise; baseline {g_b:.3f}, low-salt {g_s:.3f}"
+        )
