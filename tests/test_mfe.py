@@ -42,6 +42,39 @@ class TestFoldMFE:
         assert validate(structure)
 
 
+class TestFullZukerEnergetics:
+    """Spot-check the new Zuker MFE engine against canonical small-hairpin physics."""
+
+    def test_tetraloop_hairpin_negative_dg(self):
+        # GC-clamped tetraloop hairpin is a textbook stable structure.
+        _, energy, pairs = fold_mfe("GCGCAAAAGCGC", material="rna")
+        assert energy < -3.0, f"expected stable hairpin (ΔG < -3), got {energy:.2f}"
+        assert len(pairs) >= 3
+
+    def test_stack_consistency_with_pfunc(self):
+        # MFE energy must be ≤ ensemble ΔG (ensemble averages over all states).
+        from strider.thermo.engine import ThermoEngine
+        seq = "GCGCAAAAGCGC"
+        _, mfe_e, _ = fold_mfe(seq, material="rna")
+        e = ThermoEngine(material="rna", celsius=37.0).pfunc(seq).free_energy
+        assert mfe_e <= e + 1e-6, f"MFE {mfe_e:.3f} should not exceed ensemble ΔG {e:.3f}"
+
+    def test_internal_loop_handled(self):
+        # Sequence with a forced 1×2 internal loop in the optimal fold:
+        # outer stem GC|GC, internal loop A vs AA, hairpin loop AAAA.
+        seq = "GCAGCAAAAGCAAGC"
+        _, energy, pairs = fold_mfe(seq, material="rna")
+        # The internal-loop branch should produce more pairs than just a single stack would.
+        assert len(pairs) >= 4
+
+    def test_multiloop_branch_explored(self):
+        # Two stems separated by a small linker: should find a multiloop OR two
+        # external stems.  Either way, total pairs ≥ 6.
+        seq = "GCGCGGAAAACCGCGCAACGCGCAAAAGCGCG"
+        _, _, pairs = fold_mfe(seq, material="rna")
+        assert len(pairs) >= 6
+
+
 class TestDotBracket:
     def test_parse_simple(self):
         pairs = parse_pairs("((...))")

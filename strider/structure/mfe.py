@@ -1,23 +1,26 @@
 """
-MFE secondary structure prediction via dynamic programming.
+Minimum free energy (MFE) secondary structure prediction.
 
-Implements a simplified Zuker-style algorithm using nearest-neighbor
-stacking energies from SantaLucia 2004 / Turner 2004, with hairpin loop
-penalties from Turner tables.
+Implements the Zuker–Stiegler dynamic program with the full nearest-neighbor
+energy decomposition (hairpin, stack, internal loop, bulge, multi-branch
+loop) shared with the McCaskill partition-function DP in
+:mod:`strider.thermo.ensemble`.  Both engines consume the same loop-energy
+functions, so MFE energies and ensemble ΔG are mutually consistent.
 
-For production accuracy on long sequences, use the ViennaRNA backend.
-This native implementation is designed to be correct for short hairpins
-(< 60 nt) and diagnostic verification tasks common in CHA design.
+References
+----------
+Zuker M. & Stiegler P. (1981) Nucleic Acids Res. 9: 133-148.
+SantaLucia J. & Hicks D. (2004) Annu. Rev. Biophys. Biomol. Struct. 33: 415-440.
+Mathews D.H., Sabina J., Zuker M., Turner D.H. (1999) J. Mol. Biol. 288: 911-940.
+Lu Z.J., Turner D.H., Mathews D.H. (2006) Nucleic Acids Res. 34: 4912-4924.
 """
 
 from __future__ import annotations
-import math
 import numpy as np
 
 INF = float("inf")
-R = 1.987e-3  # kcal / (mol · K)
-
-MIN_HAIRPIN_LOOP = 3  # minimum unpaired bases in hairpin
+MIN_HAIRPIN_LOOP = 3   # minimum unpaired bases inside a hairpin loop
+_MAX_IL = 30           # maximum internal-loop / bulge size (matches ensemble.py)
 
 
 def fold_mfe(
@@ -26,162 +29,268 @@ def fold_mfe(
     material: str = "dna",
 ) -> tuple[str, float, list[tuple[int, int]]]:
     """
-    Predict MFE secondary structure for a single strand.
+    Predict the MFE secondary structure for a single strand.
 
-    Returns:
-        structure  : dot-bracket string
-        energy     : MFE (kcal/mol, negative = stable)
-        pairs      : list of (i, j) base-pair tuples (0-based)
+    Parameters
+    ----------
+    sequence : nucleotide sequence (case-insensitive, U/T interchangeable).
+    celsius  : temperature in °C (default 37).
+    material : ``"dna"`` or ``"rna"``.
+
+    Returns
+    -------
+    structure : dot-bracket string (length ``len(sequence)``).
+    energy    : MFE in kcal/mol (negative = stable).
+    pairs     : list of ``(i, j)`` 0-indexed base-pair positions.
     """
     seq = _normalize(sequence, material)
     n = len(seq)
     if n == 0:
         return "", 0.0, []
 
-    # DP table: V[i][j] = min energy structure where (i,j) is a base pair
-    #           W[i][j] = min energy for subsequence [i..j]
-    V = np.full((n, n), INF)
-    W = np.full((n, n), 0.0)
-    traceback = {}  # (i, j) -> ("hp"|"stack"|"split", args)
+    T = celsius + 273.15
+    pairs_set = _wc_pairs(material)
+    ml_a, ml_b, ml_c = _multiloop_params(material)
 
-    can = _can_pair_fn(material)
-    stack_e = _stack_fn(material)
+    # DP tables
+    V   = np.full((n, n), INF)   # V[i,j]: min energy with (i,j) paired
+    W   = np.zeros((n, n))       # W[i,j]: min energy on [i..j], any topology
+    WM  = np.full((n, n), INF)   # WM[i,j]: multi-loop fragment, ≥1 branch
+    WM1 = np.full((n, n), INF)   # WM1[i,j]: multi-loop fragment, branch ends at j
 
-    for length in range(1, n + 1):
+    can = lambda i, j: _can_pair(seq, i, j, pairs_set)
+    hairpin_e = _hairpin_energy_fn(material)
+    stack_e   = _stack_energy_fn(material)
+    il_e      = _internal_bulge_energy_fn(material)
+
+    for length in range(2, n + 1):
         for i in range(n - length + 1):
             j = i + length - 1
 
-            # V[i][j] — only if (i,j) can pair
-            if can(seq, i, j) and j - i > MIN_HAIRPIN_LOOP:
-                # Hairpin
-                hp_e = _hairpin_energy(seq, i, j, celsius, material)
-                V[i][j] = hp_e
-                traceback[(i, j)] = ("hp",)
+            # V[i,j]: structures with (i,j) paired
+            if can(i, j) and j - i > MIN_HAIRPIN_LOOP:
+                v_best = hairpin_e(seq, i, j, T)
 
-                # Stack: (i,j) wraps (i+1, j-1)
-                if can(seq, i + 1, j - 1) and j - i > MIN_HAIRPIN_LOOP + 1:
-                    e_stack = stack_e(seq, i, j) + V[i + 1][j - 1]
-                    if e_stack < V[i][j]:
-                        V[i][j] = e_stack
-                        traceback[(i, j)] = ("stack", i + 1, j - 1)
+                # Stack: (i,j) wraps (i+1,j-1)
+                if i + 1 < j - 1 and can(i + 1, j - 1):
+                    cand = stack_e(seq, i, j) + V[i + 1][j - 1]
+                    if cand < v_best:
+                        v_best = cand
 
-                # Bifurcation inside (i,j)
-                for k in range(i + 1, j):
-                    e_bif = V[i][k] + W[k + 1][j - 1] if k + 1 <= j - 1 else V[i][k]
-                    if e_bif < V[i][j]:
-                        V[i][j] = e_bif
-                        traceback[(i, j)] = ("bif", k)
+                # Internal loop / bulge: (i,j) closes (ip,jp) with unpaired bases between
+                max_ip = min(i + _MAX_IL + 1, j - MIN_HAIRPIN_LOOP - 2)
+                for ip in range(i + 1, max_ip + 1):
+                    min_jp = max(ip + MIN_HAIRPIN_LOOP + 1, j - _MAX_IL - 1)
+                    for jp in range(min_jp, j):
+                        if ip == i + 1 and jp == j - 1:
+                            continue  # covered by stack case
+                        nl = ip - i - 1
+                        nr = j - jp - 1
+                        if nl + nr == 0 or nl + nr > _MAX_IL:
+                            continue
+                        if not can(ip, jp):
+                            continue
+                        cand = il_e(seq, i, j, ip, jp, nl, nr) + V[ip][jp]
+                        if cand < v_best:
+                            v_best = cand
 
-            # W[i][j]
-            W[i][j] = W[i][j - 1]  # j unpaired
-            for k in range(i, j + 1):
-                if V[k][j] < INF:
-                    left = W[i][k - 1] if k > i else 0.0
-                    e = left + V[k][j]
-                    if e < W[i][j]:
-                        W[i][j] = e
+                # Multi-loop: (i,j) closes a multi-branch loop with ≥2 stems inside
+                for k in range(i + 2, j - 1):
+                    if WM[i + 1][k] < INF and WM1[k + 1][j - 1] < INF:
+                        cand = ml_a + ml_b + WM[i + 1][k] + WM1[k + 1][j - 1]
+                        if cand < v_best:
+                            v_best = cand
+
+                V[i][j] = v_best
+
+            # WM1[i,j]: multi-loop fragment containing exactly one branch ending at j
+            wm1_best = INF
+            if V[i][j] < INF:
+                wm1_best = V[i][j] + ml_b
+            if j > i and WM1[i][j - 1] < INF:
+                cand = WM1[i][j - 1] + ml_c
+                if cand < wm1_best:
+                    wm1_best = cand
+            WM1[i][j] = wm1_best
+
+            # WM[i,j]: multi-loop fragment with ≥1 branch
+            wm_best = WM1[i][j]
+            if j > i and WM[i][j - 1] < INF:
+                cand = WM[i][j - 1] + ml_c
+                if cand < wm_best:
+                    wm_best = cand
+            for k in range(i, j):
+                if WM[i][k] < INF and WM1[k + 1][j] < INF:
+                    cand = WM[i][k] + WM1[k + 1][j]
+                    if cand < wm_best:
+                        wm_best = cand
+            WM[i][j] = wm_best
+
+            # W[i,j]: any-topology min energy on [i..j]
+            w_best = W[i][j - 1] if j > i else 0.0   # j unpaired
+            if V[i][j] < w_best:
+                w_best = V[i][j]
+            for k in range(i, j):
+                left = W[i][k] if k > i else 0.0
+                if V[k + 1][j] < INF:
+                    cand = left + V[k + 1][j]
+                    if cand < w_best:
+                        w_best = cand
+            W[i][j] = w_best
 
     # Traceback
     pairs: list[tuple[int, int]] = []
-    _traceback_w(W, V, traceback, seq, can, 0, n - 1, pairs)
+    _traceback_W(W, V, WM, WM1, seq, 0, n - 1, T, pairs,
+                 hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+    pairs.sort()
 
-    energy = W[0][n - 1]
+    energy = float(W[0][n - 1]) if n > 1 else 0.0
     structure = _to_dot_bracket(pairs, n)
-    return structure, float(energy), sorted(pairs)
-
-
-# ─── energy functions ─────────────────────────────────────────────────────────
-
-def _hairpin_energy(seq: str, i: int, j: int, celsius: float, material: str) -> float:
-    """Turner table hairpin loop free energy (kcal/mol) for the closing pair (i, j)."""
-    loop = j - i - 1
-    if loop < MIN_HAIRPIN_LOOP:
-        return INF
-    T = celsius + 273.15
-    if material == "rna":
-        if loop <= 9:
-            table = [INF, INF, INF, 5.4, 5.6, 5.7, 5.4, 6.0, 5.5, 6.4]
-            base = table[loop]
-        else:
-            base = 5.4 + 1.75 * R * T * math.log(loop / 9.0)
-    else:
-        if loop <= 9:
-            table = [INF, INF, INF, 4.1, 4.3, 4.9, 4.4, 4.3, 4.1, 4.0]
-            base = table[loop]
-        else:
-            base = 4.0 + 1.75 * R * T * math.log(loop / 9.0)
-    return base
-
-
-def _can_pair_fn(material: str):
-    """Return a closure can(seq, i, j) that checks Watson-Crick pairing for the given material."""
-    if material == "rna":
-        wc = {("A", "U"), ("U", "A"), ("G", "C"), ("C", "G"), ("G", "U"), ("U", "G")}
-    else:
-        wc = {("A", "T"), ("T", "A"), ("G", "C"), ("C", "G")}
-
-    def can(seq: str, i: int, j: int) -> bool:
-        return (seq[i], seq[j]) in wc and (j - i) > MIN_HAIRPIN_LOOP
-
-    return can
-
-
-def _stack_fn(material: str):
-    """Return a closure stack(seq, i, j) that looks up the ΔG37 stacking energy for pair (i, j)."""
-    if material == "dna":
-        from strider.thermo.nn_dna import DNA_NN
-        params = DNA_NN
-    else:
-        from strider.thermo.nn_rna import RNA_NN
-        params = RNA_NN
-
-    def stack(seq: str, i: int, j: int) -> float:
-        dinuc = seq[i] + seq[i + 1]
-        if dinuc in params:
-            return params[dinuc][2]
-        return -1.5
-
-    return stack
+    return structure, energy, pairs
 
 
 # ─── traceback ────────────────────────────────────────────────────────────────
 
-def _traceback_w(W, V, tb, seq, can, i, j, pairs):
-    """Traceback through the W table to recover base-pair list for subsequence [i..j]."""
-    if i >= j:
+def _traceback_W(W, V, WM, WM1, seq, i, j, T, out, hairpin_e, stack_e, il_e,
+                 can, ml_a, ml_b, ml_c):
+    """Recover the base-pair list achieving W[i..j] by following the recurrences."""
+    if j <= i:
         return
-    if W[i][j] == W[i][j - 1]:
-        _traceback_w(W, V, tb, seq, can, i, j - 1, pairs)
+    target = W[i][j]
+
+    # j unpaired
+    left_w = W[i][j - 1] if j > i else 0.0
+    if abs(target - left_w) < 1e-9:
+        _traceback_W(W, V, WM, WM1, seq, i, j - 1, T, out,
+                     hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
         return
-    for k in range(i, j + 1):
-        if V[k][j] < INF:
-            left = W[i][k - 1] if k > i else 0.0
-            if abs(left + V[k][j] - W[i][j]) < 1e-9:
-                if k > i:
-                    _traceback_w(W, V, tb, seq, can, i, k - 1, pairs)
-                _traceback_v(V, tb, seq, can, k, j, pairs)
+
+    # (i,j) is the outer pair
+    if abs(target - V[i][j]) < 1e-9:
+        out.append((i, j))
+        _traceback_V(V, WM, WM1, seq, i, j, T, out,
+                     hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+        return
+
+    # Split point k: W[i..k] + V[k+1..j]
+    for k in range(i, j):
+        left = W[i][k] if k > i else 0.0
+        if V[k + 1][j] < INF and abs(target - (left + V[k + 1][j])) < 1e-9:
+            if k > i:
+                _traceback_W(W, V, WM, WM1, seq, i, k, T, out,
+                             hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+            out.append((k + 1, j))
+            _traceback_V(V, WM, WM1, seq, k + 1, j, T, out,
+                         hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+            return
+
+
+def _traceback_V(V, WM, WM1, seq, i, j, T, out, hairpin_e, stack_e, il_e,
+                 can, ml_a, ml_b, ml_c):
+    """Recover the base-pair decomposition of V[i,j] (forced pair at (i,j))."""
+    target = V[i][j]
+
+    # Hairpin
+    if abs(target - hairpin_e(seq, i, j, T)) < 1e-9:
+        return
+
+    # Stack
+    if i + 1 < j - 1 and can(i + 1, j - 1):
+        cand = stack_e(seq, i, j) + V[i + 1][j - 1]
+        if abs(target - cand) < 1e-9:
+            out.append((i + 1, j - 1))
+            _traceback_V(V, WM, WM1, seq, i + 1, j - 1, T, out,
+                         hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+            return
+
+    # Internal loop / bulge
+    max_ip = min(i + _MAX_IL + 1, j - MIN_HAIRPIN_LOOP - 2)
+    for ip in range(i + 1, max_ip + 1):
+        min_jp = max(ip + MIN_HAIRPIN_LOOP + 1, j - _MAX_IL - 1)
+        for jp in range(min_jp, j):
+            if ip == i + 1 and jp == j - 1:
+                continue
+            nl = ip - i - 1
+            nr = j - jp - 1
+            if nl + nr == 0 or nl + nr > _MAX_IL:
+                continue
+            if not can(ip, jp):
+                continue
+            cand = il_e(seq, i, j, ip, jp, nl, nr) + V[ip][jp]
+            if abs(target - cand) < 1e-9:
+                out.append((ip, jp))
+                _traceback_V(V, WM, WM1, seq, ip, jp, T, out,
+                             hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+                return
+
+    # Multi-loop
+    for k in range(i + 2, j - 1):
+        if WM[i + 1][k] < INF and WM1[k + 1][j - 1] < INF:
+            cand = ml_a + ml_b + WM[i + 1][k] + WM1[k + 1][j - 1]
+            if abs(target - cand) < 1e-9:
+                _traceback_WM(V, WM, WM1, seq, i + 1, k, T, out,
+                              hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+                _traceback_WM1(V, WM, WM1, seq, k + 1, j - 1, T, out,
+                               hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
                 return
 
 
-def _traceback_v(V, tb, seq, can, i, j, pairs):
-    """Traceback through the V table starting at forced pair (i, j), appending to pairs."""
-    if (i, j) not in tb:
+def _traceback_WM1(V, WM, WM1, seq, i, j, T, out, hairpin_e, stack_e, il_e,
+                   can, ml_a, ml_b, ml_c):
+    """Recover the single-branch multi-loop fragment WM1[i,j]."""
+    target = WM1[i][j]
+    if V[i][j] < INF and abs(target - (V[i][j] + ml_b)) < 1e-9:
+        out.append((i, j))
+        _traceback_V(V, WM, WM1, seq, i, j, T, out,
+                     hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
         return
-    pairs.append((i, j))
-    action = tb[(i, j)]
-    if action[0] == "hp":
+    if j > i and WM1[i][j - 1] < INF:
+        if abs(target - (WM1[i][j - 1] + ml_c)) < 1e-9:
+            _traceback_WM1(V, WM, WM1, seq, i, j - 1, T, out,
+                           hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+            return
+
+
+def _traceback_WM(V, WM, WM1, seq, i, j, T, out, hairpin_e, stack_e, il_e,
+                  can, ml_a, ml_b, ml_c):
+    """Recover the multi-loop fragment WM[i,j] (≥1 branch)."""
+    target = WM[i][j]
+    if abs(target - WM1[i][j]) < 1e-9:
+        _traceback_WM1(V, WM, WM1, seq, i, j, T, out,
+                       hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
         return
-    if action[0] == "stack":
-        _traceback_v(V, tb, seq, can, action[1], action[2], pairs)
-    elif action[0] == "bif":
-        k = action[1]
-        _traceback_v(V, tb, seq, can, i, k, pairs)
+    if j > i and WM[i][j - 1] < INF and abs(target - (WM[i][j - 1] + ml_c)) < 1e-9:
+        _traceback_WM(V, WM, WM1, seq, i, j - 1, T, out,
+                      hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+        return
+    for k in range(i, j):
+        if WM[i][k] < INF and WM1[k + 1][j] < INF:
+            cand = WM[i][k] + WM1[k + 1][j]
+            if abs(target - cand) < 1e-9:
+                _traceback_WM(V, WM, WM1, seq, i, k, T, out,
+                              hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+                _traceback_WM1(V, WM, WM1, seq, k + 1, j, T, out,
+                               hairpin_e, stack_e, il_e, can, ml_a, ml_b, ml_c)
+                return
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
+def _wc_pairs(material: str) -> set[frozenset[str]]:
+    """Watson–Crick (plus G·U wobble for RNA) allowed base pairs."""
+    if material == "rna":
+        return {frozenset("AU"), frozenset("UA"), frozenset("GC"), frozenset("CG"),
+                frozenset("GU"), frozenset("UG")}
+    return {frozenset("AT"), frozenset("TA"), frozenset("GC"), frozenset("CG")}
+
+
+def _can_pair(seq: str, i: int, j: int, pairs: set) -> bool:
+    """True if (seq[i], seq[j]) is a permitted pair and the loop is large enough."""
+    return frozenset([seq[i], seq[j]]) in pairs and (j - i) > MIN_HAIRPIN_LOOP
+
+
 def _normalize(seq: str, material: str) -> str:
-    """Uppercase seq and convert T↔U according to material ('dna' or 'rna')."""
+    """Uppercase and unify T/U letters for the chosen ``material`` alphabet."""
     seq = seq.upper()
     if material == "dna":
         return seq.replace("U", "T")
@@ -189,9 +298,75 @@ def _normalize(seq: str, material: str) -> str:
 
 
 def _to_dot_bracket(pairs: list[tuple[int, int]], n: int) -> str:
-    """Convert a list of (i, j) pairs to a length-n dot-bracket string."""
+    """Render a sorted pair list as a length-``n`` dot-bracket string."""
     db = ["."] * n
     for i, j in pairs:
         db[i] = "("
         db[j] = ")"
     return "".join(db)
+
+
+# ─── shared energy adapters ───────────────────────────────────────────────────
+#
+# These thin wrappers route MFE energy lookups through the same functions that
+# `strider.thermo.ensemble` uses for the partition function.  Keeping a single
+# energy source means MFE energies and Boltzmann-weighted ensemble ΔG cannot
+# drift apart.
+
+def _hairpin_energy_fn(material: str):
+    """Return ``hairpin(seq, i, j, T)`` reading from the canonical loop tables."""
+    from strider.thermo.ensemble import _hairpin_loop_energy
+
+    def hairpin(seq: str, i: int, j: int, T: float) -> float:
+        return _hairpin_loop_energy(seq, i, j, material, T)
+    return hairpin
+
+
+def _stack_energy_fn(material: str):
+    """Return ``stack(seq, i, j)`` for the closing pair (i,j) over inner pair (i+1,j-1)."""
+    from strider.thermo.ensemble import _stack_energy
+
+    def stack(seq: str, i: int, j: int) -> float:
+        return _stack_energy(seq, i, j, material)
+    return stack
+
+
+def _internal_bulge_energy_fn(material: str):
+    """Return ``il(seq, i, j, ip, jp, nl, nr)`` for internal-loop / bulge contributions."""
+    from strider.thermo.ensemble import _interior_bulge_energy
+
+    def il(seq, i, j, ip, jp, nl, nr):
+        return _interior_bulge_energy(seq, i, j, ip, jp, nl, nr, material)
+    return il
+
+
+def _multiloop_params(material: str) -> tuple[float, float, float]:
+    """Multi-loop linear coefficients (a, b, c): a + b·branches + c·unpaired."""
+    if material == "dna":
+        from strider.thermo.parameters_dna import ML_INIT, ML_PAIR, ML_BASE
+    else:
+        from strider.thermo.parameters_rna import ML_INIT, ML_PAIR, ML_BASE
+    return float(ML_INIT), float(ML_PAIR), float(ML_BASE)
+
+
+# ─── backward-compatible private API ──────────────────────────────────────────
+# These are imported by strider.structure.pseudoknot.  Names preserved.
+
+def _can_pair_fn(material: str):
+    """Return ``can(seq, i, j) -> bool`` using the material's WC (+ wobble) pair set."""
+    pairs = _wc_pairs(material)
+
+    def can(seq: str, i: int, j: int) -> bool:
+        return _can_pair(seq, i, j, pairs)
+    return can
+
+
+def _stack_fn(material: str):
+    """Return ``stack(seq, i, j) -> float`` — same function used by the MFE DP."""
+    return _stack_energy_fn(material)
+
+
+def _hairpin_energy(seq: str, i: int, j: int, celsius: float, material: str) -> float:
+    """Hairpin loop ΔG (kcal/mol).  Same function used by the MFE DP."""
+    from strider.thermo.ensemble import _hairpin_loop_energy
+    return _hairpin_loop_energy(seq, i, j, material, celsius + 273.15)
