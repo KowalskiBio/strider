@@ -40,9 +40,13 @@ _MAX_IL = 30        # maximum interior loop / bulge size to enumerate
 
 
 def _wc_pairs(material: str) -> set[frozenset[str]]:
+    # All internal sequence handling is done in T-form (U normalized to T at the
+    # entry points), so RNA pair sets are expressed in T-form with the GU wobble
+    # encoded as GT/TG.  This keeps every downstream table lookup against the
+    # T-keyed Turner / SantaLucia tables consistent for both materials.
     if material == "rna":
-        return {frozenset("AU"), frozenset("UA"), frozenset("GC"), frozenset("CG"),
-                frozenset("GU"), frozenset("UG")}
+        return {frozenset("AT"), frozenset("TA"), frozenset("GC"), frozenset("CG"),
+                frozenset("GT"), frozenset("TG")}
     return {frozenset("AT"), frozenset("TA"), frozenset("GC"), frozenset("CG")}
 
 
@@ -65,7 +69,11 @@ def ensemble_dg(
     Defaults to 1 M Na⁺ / 0 Mg²⁺ — the SantaLucia/Turner reference state, at
     which no correction is applied.
     """
-    seq = sequence.upper().replace("U", "T") if material == "dna" else sequence.upper().replace("T", "U")
+    # Always work in T-form internally.  RNA-specific tables (TERMINAL_PENALTY,
+    # TERMINAL_MISMATCH, DANGLE_*, INTERIOR_MISMATCH, STACK) all use T-keyed
+    # entries; only HAIRPIN_TRILOOP / HAIRPIN_TETRALOOP for RNA are U-keyed,
+    # and we convert locally at those lookup sites.
+    seq = sequence.upper().replace("U", "T")
     n = len(seq)
     T = celsius + 273.15
     pairs = _wc_pairs(material)
@@ -161,10 +169,11 @@ def _hairpin_loop_energy(seq: str, i: int, j: int, material: str, T: float) -> f
             key = key.replace("T", "U")
         dG += HAIRPIN_TETRALOOP.get(key, 0.0)
 
-    # Mismatch key order = seq[j-1]+seq[j]+seq[i]+seq[i+1]  (canonical NN order)
+    # Mismatch key order = seq[j-1]+seq[j]+seq[i]+seq[i+1]  (canonical NN order).
+    # seq is normalized to T-form at the entry point and both RNA and DNA
+    # TERMINAL_MISMATCH / HAIRPIN_MISMATCH tables are T-keyed, so no further
+    # normalization is needed here.
     mm_key = seq[j - 1] + seq[j] + seq[i] + seq[i + 1]
-    if material == "rna":
-        mm_key = mm_key.replace("T", "U")
     dG += mismatch_table.get(mm_key, 0.0)
 
     # Terminal penalty for closing pair (external/multi-loop context)
@@ -688,7 +697,7 @@ def multistrand_pairs(
     over the concatenated sequence.  Strand boundaries are tracked internally as
     nicks so no hairpin can span a junction.
     """
-    seq = "".join(sequences)
+    seq = "".join(sequences).upper().replace("U", "T")
     n = len(seq)
     if n == 0:
         return 0.0, np.zeros((0, 0))
@@ -749,7 +758,7 @@ def _multistrand_dg(
     Ensemble ΔG for the concatenated multi-strand complex (kcal/mol).
     Includes the bimolecular JOIN_PENALTY for each inter-strand association.
     """
-    seq = "".join(sequences)
+    seq = "".join(sequences).upper().replace("U", "T")
     n = len(seq)
     if n == 0:
         return 0.0

@@ -34,7 +34,8 @@ Beyond thermodynamics, strider provides a **`Tube` / `ComplexSet` API** for mult
    - [Stochastic simulation via mantis](#13-stochastic-simulation-via-mantis)
    - [Parameter sweeps and caching](#14-parameter-sweeps-and-caching)
    - [Parameter sets and custom NN tables](#15-parameter-sets-and-custom-nn-tables)
-   - [Export formats](#16-export-formats)
+   - [Differentiable thermodynamics (PyTorch)](#16-differentiable-thermodynamics-pytorch)
+   - [Export formats](#17-export-formats)
 6. [API reference](#api-reference)
 7. [Examples](#examples)
 8. [Backend comparison](#backend-comparison)
@@ -1259,7 +1260,50 @@ The exporter writes every sub-table, so the result is a complete self-contained 
 
 ---
 
-### 16. Export formats
+### 16. Differentiable thermodynamics (PyTorch)
+
+`strider.thermo.differentiable` provides a fully batched PyTorch McCaskill-style partition-function DP whose nearest-neighbor parameters are `nn.Parameter`s — so the same ensemble ΔG that `ThermoEngine.pfunc(...)` computes can be back-propagated through, optimized, and trained against experimental data. The intended use case is calibrating the Turner / SantaLucia tables (or a small neural residual on top of them) directly against melt curves, gel data, or fluorescent kinetic assays.
+
+```python
+import torch
+from strider.thermo.differentiable import ThermoParameters, BatchedPartitionFunction
+
+params = ThermoParameters(material="rna")              # all NN tables exposed as nn.Parameter
+model  = BatchedPartitionFunction(params)
+
+# Batched forward — sequences of arbitrary length, padded internally.
+energies = model(["GGGCUUCGGCCC", "AUGCAUGC", "GCGCGC"])   # tensor shape (B,)
+
+# Train against measured ensemble ΔG values
+target = torch.tensor([-5.20, -0.005, -2.10], dtype=torch.float64)
+loss   = torch.nn.functional.mse_loss(energies, target)
+loss.backward()                                            # gradients flow into every NN table
+```
+
+The PyTorch engine implements the same Mathews-Turner conventions as the native McCaskill engine in `thermo/ensemble.py`. After the alignment effort tracked across this codebase the two engines agree to within ~0.05 kcal/mol on triloop hairpins and small stems, and ~0.2 kcal/mol on Y-shape multiloops; longer random sequences still diverge by a few kcal/mol because the diff engine's stack table is restricted to the 16 canonical WC stacks (no wobble / mismatch stacks) and the single-base-bulge STACK term isn't yet wired in. Reproduce with `python scratch/compare_engines.py`.
+
+| Family | mean \|res\| (diff vs native, RNA, 37 °C) | status |
+|---|---:|---|
+| 10-nt random RNA | 0.03 kcal/mol | aligned |
+| Triloop hairpins | 0.005–0.05 kcal/mol | aligned |
+| Tetraloop hairpins | 0.15–0.30 kcal/mol | aligned (within dangle precision) |
+| Y-shape multiloops (32 nt) | 0.20 kcal/mol | aligned |
+| 32-nt random RNA | 2.8 kcal/mol | gap dominated by missing wobble / mismatch stacks |
+| 64-nt random RNA | 4.1 kcal/mol | same |
+
+Physical conventions wired identically across both engines:
+
+- **U/T normalization at every lookup site.** RNA sequences are folded in T-form internally so that `TERMINAL_PENALTY`, `TERMINAL_MISMATCH`, `DANGLE_3` / `DANGLE_5`, `INTERIOR_MISMATCH`, and `STACK` (all stored with T-keys in `parameters_rna.py`) hit correctly; only `HAIRPIN_TRILOOP` / `HAIRPIN_TETRALOOP` are looked up in U-form.
+- **Triloop terminal-mismatch convention.** The first-mismatch term at the closing pair applies only for `loop_size >= 4`; triloops carry only the special-loop bonus + terminal-pair penalty.
+- **External-loop dangle decoration.** Four-state per stem (BARE / D5 / D3 / D5+D3) with each dangle decoration sign-gated (only added when its ΔG < 0). The D5 cases use the left context `W[i, k−2]` so the dangle base at `k−1` is not double-counted as unpaired.
+- **Multiloop initiation.** The outer closing pair charges `ML_INIT + ML_PAIR`; each inner stem charges `ML_PAIR` via the `M` / `M1` recurrences, matching `bm_ml_init_pair = boltz(ML_INIT + ML_PAIR)` in `ensemble.py`.
+- **Interior-loop / bulge universal correction.** Single-base bulges add `+TP_outer − TP_inner`; multi-base bulges and RNA general interior loops add `+2·TP_outer`; DNA interior loops add `+TP_outer − TP_inner` (the `INTERIOR_MISMATCH`-at-junctions DNA refinement is tracked as a follow-up).
+
+Training entry point is `strider/thermo/train.py`. The intended workflow is `BatchedPartitionFunction(ThermoParameters(material=...))` → torch optimizer over the parameter groups (physical tables on an aggressive LR, neural-residual MLPs on a conservative LR — see `tests/test_differentiable.py::test_toy_training_step` for the pattern).
+
+---
+
+### 17. Export formats
 
 ```python
 from strider import to_vienna, to_ct, to_bpseq, to_fasta, to_oxdna, write
@@ -1695,7 +1739,7 @@ pip install -e .[dev]
 pytest tests/ -v
 ```
 
-The test suite has **315 tests, all green** (1 skipped — a mantis-integration test when mantis-delta is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
+The test suite has **319 tests, all green** (1 skipped — a mantis-integration test when mantis-delta is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
 
 | File | Tests | What is covered |
 |---|---|---|
@@ -1718,6 +1762,7 @@ The test suite has **315 tests, all green** (1 skipped — a mantis-integration 
 | `test_screener.py` | 6 | Off-target k-mer screening |
 | `test_cotranscriptional.py` | 9 | Prefix-by-prefix folding trajectory, rearrangement detection |
 | `test_cli.py` | 14 | `strider fold/pfunc/duplex/melt/cotx`, JSON output, stdin / @file sequence input |
+| `test_differentiable.py` | 4 | `ThermoParameters` init, batched forward, backward-gradient propagation, toy training step |
 
 > **Note:** tests requiring `mantis-delta` are skipped if it is not installed (install via `pip install -e ../mantis` for editable mode).
 

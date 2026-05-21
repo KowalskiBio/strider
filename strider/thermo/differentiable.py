@@ -54,6 +54,53 @@ class ThermoParameters(nn.Module):
         super().__init__()
         self.material = material
         
+        # Load material-specific parameters
+        if material == "rna":
+            from strider.thermo.parameters_rna import (
+                TERMINAL_MISMATCH as P_TERM_MISMATCH,
+                HAIRPIN_SIZE as P_HAIRPIN_SIZE,
+                INTERIOR_SIZE as P_INTERIOR_SIZE,
+                BULGE_SIZE as P_BULGE_SIZE,
+                ASYMMETRY_NINIO as P_ASYMMETRY_NINIO,
+                DANGLE_3 as P_DANGLE_3,
+                DANGLE_5 as P_DANGLE_5,
+                ML_BASE as P_ML_BASE,
+                ML_INIT as P_ML_INIT,
+                ML_PAIR as P_ML_PAIR,
+                TERMINAL_PENALTY as P_TERMINAL_PENALTY,
+                HAIRPIN_TRILOOP as P_TRILOOP,
+                HAIRPIN_TETRALOOP as P_TETRALOOP
+            )
+        else:
+            from strider.thermo.parameters_dna import (
+                TERMINAL_MISMATCH as P_TERM_MISMATCH,
+                HAIRPIN_SIZE as P_HAIRPIN_SIZE,
+                INTERIOR_SIZE as P_INTERIOR_SIZE,
+                BULGE_SIZE as P_BULGE_SIZE,
+                ASYMMETRY_NINIO as P_ASYMMETRY_NINIO,
+                DANGLE_3 as P_DANGLE_3,
+                DANGLE_5 as P_DANGLE_5,
+                ML_BASE as P_ML_BASE,
+                ML_INIT as P_ML_INIT,
+                ML_PAIR as P_ML_PAIR,
+                TERMINAL_PENALTY as P_TERMINAL_PENALTY,
+                HAIRPIN_TRILOOP as P_TRILOOP,
+                HAIRPIN_TETRALOOP as P_TETRALOOP
+            )
+            
+        self.terminal_penalty_dict = P_TERMINAL_PENALTY
+        self.triloop_dict = P_TRILOOP
+        self.tetraloop_dict = P_TETRALOOP
+
+        # 4×4 LUT for terminal-pair (AU/GU/AT) penalty, indexed by base
+        # integer codes (A=0, C=1, G=2, T/U=3).  Same values as
+        # P_TERMINAL_PENALTY but reshaped for tensorised lookup in the DP.
+        base_map = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'U': 3}
+        tp_lut = torch.zeros(4, 4, dtype=torch.float64)
+        for k, v in P_TERMINAL_PENALTY.items():
+            tp_lut[base_map[k[0]], base_map[k[1]]] = v
+        self.terminal_penalty_lut = nn.Parameter(tp_lut)
+
         # 1. Stacking Parameters
         dinucs = list(RNA_NN.keys())
         self.dinuc_vocab = dinucs
@@ -62,28 +109,25 @@ class ThermoParameters(nn.Module):
         self.default_stack = nn.Parameter(torch.tensor(-1.5, dtype=torch.float64))
 
         # 2. Hairpin Size Penalties
-        self.hairpin_sizes = nn.Parameter(torch.tensor(RNA_HAIRPIN_SIZE, dtype=torch.float64))
+        self.hairpin_sizes = nn.Parameter(torch.tensor(P_HAIRPIN_SIZE, dtype=torch.float64))
         
         # 3. Terminal Mismatch
         self.term_mismatch = nn.Parameter(torch.zeros(256, dtype=torch.float64))
         base_map = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'U': 3}
-        for k, v in RNA_TERM_MISMATCH.items():
+        for k, v in P_TERM_MISMATCH.items():
             idx = base_map[k[0]]*64 + base_map[k[1]]*16 + base_map[k[2]]*4 + base_map[k[3]]
             self.term_mismatch.data[idx] = v
         self.default_term = nn.Parameter(torch.tensor(0.0, dtype=torch.float64))
         
         # 4. Multiloop penalties
-        # New Log-Space Reparameterization:
-        # We initialize them as the natural log of their literature values 
-        # to ensure they start at the exact same physical baseline.
-        self.ml_base_raw = nn.Parameter(torch.log(torch.tensor(max(RNA_ML_BASE, 1e-3), dtype=torch.float64)))
-        self.ml_init_raw = nn.Parameter(torch.log(torch.tensor(max(RNA_ML_INIT, 1e-3), dtype=torch.float64)))
-        self.ml_pair_raw = nn.Parameter(torch.log(torch.tensor(max(RNA_ML_PAIR, 1e-3), dtype=torch.float64)))
+        self.ml_base_raw = nn.Parameter(torch.log(torch.tensor(max(P_ML_BASE, 1e-3), dtype=torch.float64)))
+        self.ml_init_raw = nn.Parameter(torch.log(torch.tensor(max(P_ML_INIT, 1e-3), dtype=torch.float64)))
+        self.ml_pair_raw = nn.Parameter(torch.log(torch.tensor(max(P_ML_PAIR, 1e-3), dtype=torch.float64)))
 
         # 5. Interior Loops & Bulges
-        self.interior_sizes = nn.Parameter(torch.tensor(RNA_INTERIOR_SIZE, dtype=torch.float64))
-        self.bulge_sizes_raw = nn.Parameter(torch.log(torch.clamp(torch.tensor(RNA_BULGE_SIZE, dtype=torch.float64), min=1e-3)))
-        self.asymmetry_ninio = nn.Parameter(torch.tensor(RNA_ASYMMETRY_NINIO, dtype=torch.float64))
+        self.interior_sizes = nn.Parameter(torch.tensor(P_INTERIOR_SIZE, dtype=torch.float64))
+        self.bulge_sizes_raw = nn.Parameter(torch.log(torch.clamp(torch.tensor(P_BULGE_SIZE, dtype=torch.float64), min=1e-3)))
+        self.asymmetry_ninio = nn.Parameter(torch.tensor(P_ASYMMETRY_NINIO, dtype=torch.float64))
 
         # 6. Neural DP for Interior Loops
         self.mlp_1_1 = nn.Sequential(
@@ -105,11 +149,11 @@ class ThermoParameters(nn.Module):
         # 7. Dangles
         self.dangle_3 = nn.Parameter(torch.zeros(64, dtype=torch.float64))
         self.dangle_5 = nn.Parameter(torch.zeros(64, dtype=torch.float64))
-        for k, v in RNA_DANGLE_3.items():
+        for k, v in P_DANGLE_3.items():
             if len(k) == 3:
                 idx = base_map[k[0]]*16 + base_map[k[1]]*4 + base_map[k[2]]
                 self.dangle_3.data[idx] = v
-        for k, v in RNA_DANGLE_5.items():
+        for k, v in P_DANGLE_5.items():
             if len(k) == 3:
                 idx = base_map[k[0]]*16 + base_map[k[1]]*4 + base_map[k[2]]
                 self.dangle_5.data[idx] = v
@@ -185,6 +229,35 @@ class BatchedPartitionFunction(nn.Module):
                 if dinuc in self.params.dinuc_to_idx:
                     dinuc_indices[b, i] = self.params.dinuc_to_idx[dinuc]
                     valid_dinuc[b, i] = True
+                    
+        # Precompute hairpin_bonus tensor on CPU (transferred to the correct device)
+        hairpin_bonus = torch.zeros(B, max_N, max_N, dtype=torch.float64, device=device)
+        for b, seq in enumerate(normalized_seqs):
+            L = len(sequences[b])
+            for i in range(L):
+                for j in range(i + 4, L):  # loop size >= 3 -> j - i >= 4
+                    loop_size = j - i - 1
+                    
+                    # 1. Terminal pair penalty for closing pair (i, j)
+                    term_key = seq[i] + seq[j]
+                    if material == "rna":
+                        term_key = term_key.replace("T", "U")
+                    dG_bonus = self.params.terminal_penalty_dict.get(term_key, 0.0)
+                    
+                    # 2. Special triloop/tetraloop bonuses
+                    if loop_size == 3:
+                        loop_key = seq[i:j+1]
+                        if material == "rna":
+                            loop_key = loop_key.replace("T", "U")
+                        dG_bonus += self.params.terminal_penalty_dict.get(seq[j] + seq[i], 0.0)
+                        dG_bonus += self.params.triloop_dict.get(loop_key, 0.0)
+                    elif loop_size == 4:
+                        loop_key = seq[i:j+1]
+                        if material == "rna":
+                            loop_key = loop_key.replace("T", "U")
+                        dG_bonus += self.params.tetraloop_dict.get(loop_key, 0.0)
+                        
+                    hairpin_bonus[b, i, j] = dG_bonus
         
         # Intermediate Dynamic Programming Array Allocation
         V = torch.full((B, max_N, max_N), INF, dtype=torch.float64, device=device)
@@ -205,14 +278,28 @@ class BatchedPartitionFunction(nn.Module):
                 hp_len = d - 1
                 hp_e = self.params.get_hairpin_size_energy(hp_len)
                 hp_e_tensor = hp_e.expand(B, num_i)
-                
-                j_minus_1 = torch.clamp(j_idx - 1, min=0)
-                i_plus_1 = torch.clamp(i_idx + 1, max=max_N-1)
-                
-                idx = base_indices[:, j_minus_1] * 64 + base_indices[:, j_idx] * 16 + base_indices[:, i_idx] * 4 + base_indices[:, i_plus_1]
-                term_penalty = self.params.term_mismatch[idx]
-                
-                v_hp = torch.where(pair_mask, hp_e_tensor + term_penalty, torch.tensor(INF, dtype=torch.float64, device=device))
+
+                # Mathews-Turner: the first-mismatch (TERMINAL_MISMATCH) bonus at
+                # the closing pair applies only to tetraloops and larger.  For
+                # triloops (hp_len == 3) the special-loop table already encodes
+                # the loop-specific stability, so adding the mismatch would
+                # double-count.  ensemble.py:_hairpin_loop_energy follows the
+                # same convention by returning early on loop_size == 3.
+                if hp_len > 3:
+                    j_minus_1 = torch.clamp(j_idx - 1, min=0)
+                    i_plus_1 = torch.clamp(i_idx + 1, max=max_N - 1)
+                    idx = (
+                        base_indices[:, j_minus_1] * 64
+                        + base_indices[:, j_idx] * 16
+                        + base_indices[:, i_idx] * 4
+                        + base_indices[:, i_plus_1]
+                    )
+                    term_penalty = self.params.term_mismatch[idx]
+                else:
+                    term_penalty = torch.zeros(B, num_i, dtype=torch.float64, device=device)
+
+                bonus = hairpin_bonus[:, i_idx, j_idx]
+                v_hp = torch.where(pair_mask, hp_e_tensor + term_penalty + bonus, torch.tensor(INF, dtype=torch.float64, device=device))
                 v_options.append(v_hp)
                 
             # 2. Base Pair Stacking
@@ -269,7 +356,40 @@ class BatchedPartitionFunction(nn.Module):
                     )
                     dG_penalty = dG_penalty + torch.where(is_bulge, torch.tensor(0.0, dtype=torch.float64, device=device), asym_penalty)
                     dG_penalty_exp = dG_penalty.unsqueeze(0).unsqueeze(0).expand(B, num_i, n + 1)
-                    
+
+                    # Terminal-pair (TP) contribution at the helix junctions of
+                    # the interior loop / bulge.  Matches the universal
+                    # correction in ensemble.py:_interior_bulge_energy:
+                    #   RNA single-base bulge:        +TP_outer - TP_inner
+                    #   RNA multi-base bulge:         +2·TP_outer
+                    #   RNA general interior loop:    +2·TP_outer
+                    #   DNA (all interior loops/bulges): +TP_outer - TP_inner
+                    # TP_outer / TP_inner are looked up from the 4×4 LUT keyed
+                    # by the closing-pair base indices.
+                    tp_lut = self.params.terminal_penalty_lut
+                    b_i = base_indices[:, i_idx]                       # (B, num_i)
+                    b_j = base_indices[:, j_idx]                       # (B, num_i)
+                    b_ip = base_indices[:, ip_safe]                    # (B, num_i, n+1)
+                    b_jp = base_indices[:, jp_safe]                    # (B, num_i, n+1)
+                    TP_outer = tp_lut[b_i, b_j]                        # (B, num_i)
+                    TP_inner = tp_lut[b_ip, b_jp]                      # (B, num_i, n+1)
+
+                    if material == "rna":
+                        if n == 1:
+                            # All n==1 entries are bulges (single-base bulge).
+                            tp_correction = TP_outer.unsqueeze(-1) - TP_inner
+                        else:
+                            # +2·TP_outer for both multi-base bulges and
+                            # general interior loops under the RNA convention.
+                            tp_correction = (2.0 * TP_outer).unsqueeze(-1).expand(-1, -1, n + 1)
+                    else:
+                        # DNA: only the universal correction TP_outer - TP_inner;
+                        # INTERIOR_MISMATCH at the junctions is not yet wired
+                        # into the diff engine.
+                        tp_correction = TP_outer.unsqueeze(-1) - TP_inner
+
+                    dG_penalty_exp = dG_penalty_exp + tp_correction
+
                     # Neural DP Global Context Fine-Tuning
                     if n == 2:
                         b1, b2 = base_indices[:, i_idx], base_indices[:, j_idx]
@@ -335,6 +455,16 @@ class BatchedPartitionFunction(nn.Module):
                     v_options.append(v_int)
                     
             # 4. Multiloop Bifurcation (Autograd-Safe 1D Coordinate Loop)
+            #
+            # Charge accounting (linear multiloop model, matches
+            # ensemble.py:_qb_val via bm_ml_init_pair = boltz(ML_INIT + ML_PAIR)
+            # at the outer pair, plus ML_PAIR per inner stem via QM):
+            #   - 1 × ml_init      (the constant initiation cost)
+            #   - 1 × ml_pair      (for the OUTER closing pair (i, j))
+            #   - 1 × ml_pair      (for the FIRST inner stem V[i+1, k])
+            #   - already inside M[k+1, j-1]: one ml_pair per remaining inner stem
+            # Total: ml_init + (N + 1) × ml_pair for a multiloop with N inner
+            # stems, matching the native engine.
             L_bif = d - 3
             if L_bif > 0:
                 bif_bastes = []
@@ -343,12 +473,15 @@ class BatchedPartitionFunction(nn.Module):
                     v_k = V[:, i_idx + 1, k_vals]
                     w_k = M[:, k_vals + 1, j_idx - 1]
                     bif_bastes.append(v_k + w_k)
-                
+
                 bif_energies = torch.stack(bif_bastes, dim=-1)
-                ml_penalty = ml_pair
-                bif_scaled = -(bif_energies + ml_penalty) / RT
+                # ml_pair here is the cost of the first inner stem V[i+1, k];
+                # the remaining inner stems are already charged inside M.
+                bif_scaled = -(bif_energies + ml_pair) / RT
                 v_bif = -RT * torch.logsumexp(bif_scaled, dim=-1)
-                v_bif = v_bif + ml_init  # Apply ml_init at the final point where multiloop is closed
+                # Outer closing pair (i, j) charges ml_init + ml_pair, matching
+                # ensemble.py:395 (bm_ml_init_pair = boltz(ML_INIT + ML_PAIR)).
+                v_bif = v_bif + ml_init + ml_pair
                 v_bif = torch.where(pair_mask, v_bif, torch.tensor(INF, dtype=torch.float64, device=device))
                 v_options.append(v_bif)
                 
@@ -376,39 +509,84 @@ class BatchedPartitionFunction(nn.Module):
 
             M[:, i_idx, j_idx] = logsumexp_RT(m_options, dim=0)
 
-            # C. Compute W (External loop, grows right)
-            w_options = [W[:, i_idx, j_idx-1]] # Unpaired on right
-            
+            # C. Compute W (External loop, grows right).
+            #
+            # Mirrors the four-state external-loop decoration in
+            # ensemble.py:_fill_dp_nicks (BARE / D5 / D3 / D5+D3), with each
+            # dangle decoration sign-gated (only added when ΔG_dangle < 0).
+            # Dangle bases are explicitly removed from the left context: the
+            # D5 cases use W[i, k-2] rather than W[i, k-1], so the dangle base
+            # at k-1 is not double-counted as unpaired.
+            INF_T = torch.full((B, num_i), INF, dtype=torch.float64, device=device)
+            ZERO_T = torch.zeros(B, num_i, dtype=torch.float64, device=device)
+
+            w_options = [W[:, i_idx, j_idx - 1]]  # j unpaired (extend W right)
+
             for m_w in range(d + 1):
-                k_w = i_idx + m_w
-                k_minus_1 = k_w - 1
-                valid_k_w = k_minus_1 >= i_idx
-                k_minus_1_safe = torch.clamp(k_minus_1, min=0)
-                
-                w_left = W[:, i_idx, k_minus_1_safe]
-                w_left = torch.where(valid_k_w, w_left, torch.tensor(0.0, dtype=torch.float64, device=device))
-                
+                k_w = i_idx + m_w  # stem 5' index, k in [i, j]
+                k_minus_1_safe = torch.clamp(k_w - 1, min=0)
+                k_minus_2_safe = torch.clamp(k_w - 2, min=0)
+
+                # w_left  = W[i, k-1] when k > i, else empty seg (energy 0)
+                # w_left5 = W[i, k-2] when k > i+1; if k == i+1 the dangle
+                #           base sits at i so left5 is the empty seg (energy 0).
+                if m_w == 0:
+                    w_left = ZERO_T
+                else:
+                    w_left = W[:, i_idx, k_minus_1_safe]
+                if m_w >= 2:
+                    w_left5 = W[:, i_idx, k_minus_2_safe]
+                else:
+                    w_left5 = ZERO_T  # only consulted when m_w >= 1
+
+                # ── Stem (k_w, j_idx) ──────────────────────────────────────
                 v_right = V[:, k_w, j_idx]
-                
-                # Keep existing dangle logic for W calculations
-                idx_d5 = base_indices[:, k_w] * 16 + base_indices[:, j_idx] * 4 + base_indices[:, k_minus_1_safe]
-                dangle_5_penalty = self.params.dangle_5[idx_d5]
-                has_d5 = k_w > i_idx
-                v_right_d5 = torch.where(has_d5, v_right + dangle_5_penalty, v_right)
-                
-                w_options.append(w_left + v_right_d5)
-                
-                if d >= 1:
-                    j_minus_1_val = j_idx - 1
-                    v_right_d3 = V[:, k_w, j_minus_1_val]
-                    idx_d3 = base_indices[:, j_idx] * 16 + base_indices[:, j_minus_1_val] * 4 + base_indices[:, k_w]
-                    dangle_3_penalty = self.params.dangle_3[idx_d3]
-                    
-                    w_k_energies_d3 = w_left + v_right_d3 + dangle_3_penalty
-                    valid_k_d3 = k_w <= j_minus_1_val
-                    w_k_energies_d3 = torch.where(valid_k_d3, w_k_energies_d3, torch.tensor(INF, dtype=torch.float64, device=device))
-                    w_options.append(w_k_energies_d3)
-                    
+
+                # BARE: no decoration
+                w_options.append(w_left + v_right)
+
+                # D5: dangle base at k-1 (requires m_w >= 1)
+                if m_w >= 1:
+                    idx_d5 = (
+                        base_indices[:, k_w] * 16
+                        + base_indices[:, j_idx] * 4
+                        + base_indices[:, k_minus_1_safe]
+                    )
+                    d5 = self.params.dangle_5[idx_d5]
+                    d5_term = w_left5 + v_right + d5
+                    d5_term = torch.where(d5 < 0, d5_term, INF_T)
+                    w_options.append(d5_term)
+
+                # ── Stem (k_w, j_idx - 1) with D3 dangle at j_idx ──────────
+                if m_w < d:
+                    j_m1 = j_idx - 1
+                    v_right_d3 = V[:, k_w, j_m1]
+
+                    idx_d3 = (
+                        base_indices[:, j_idx] * 16
+                        + base_indices[:, j_m1] * 4
+                        + base_indices[:, k_w]
+                    )
+                    d3 = self.params.dangle_3[idx_d3]
+                    d3_valid = d3 < 0
+
+                    # D3 alone
+                    d3_term = w_left + v_right_d3 + d3
+                    d3_term = torch.where(d3_valid, d3_term, INF_T)
+                    w_options.append(d3_term)
+
+                    # D5 + D3 (requires m_w >= 1 for the D5 base)
+                    if m_w >= 1:
+                        idx_d5_53 = (
+                            base_indices[:, k_w] * 16
+                            + base_indices[:, j_m1] * 4
+                            + base_indices[:, k_minus_1_safe]
+                        )
+                        d5_53 = self.params.dangle_5[idx_d5_53]
+                        both_term = w_left5 + v_right_d3 + d5_53 + d3
+                        both_term = torch.where((d5_53 < 0) & d3_valid, both_term, INF_T)
+                        w_options.append(both_term)
+
             W[:, i_idx, j_idx] = logsumexp_RT(w_options, dim=0)
 
         lengths = [len(s) for s in normalized_seqs]
