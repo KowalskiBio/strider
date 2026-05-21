@@ -306,5 +306,262 @@ class DesignObjective:
         obj._labels = [label]
         return obj
 
+    # ─── dynamical (closed-loop) objectives ──────────────────────────────────
+    #
+    # These factories drive sequence optimization from the kinetic / ODE level
+    # rather than from static equilibrium defects: ``network_factory`` is a
+    # callable ``(sequences) -> mantis.CRNetwork`` (typically a bound method of
+    # ``CircuitBridge.to_crnetwork`` or a closure that rebuilds the bridge from
+    # the current sequence assignment).  Each call rebuilds the network so the
+    # rate constants reflect the latest sequences, then runs a mantis simulation
+    # or bifurcation analysis to derive the cost.
+
+    @classmethod
+    def kinetic_trajectory(
+        cls,
+        network_factory: Callable[[dict[str, str]], object],
+        initial_conditions: dict[str, float],
+        target_curve: dict[str, "object"],
+        times: "object",
+        weight: float = 1.0,
+        normalize: bool = True,
+        label: str = "kinetic_trajectory",
+    ) -> "DesignObjective":
+        """
+        Penalize the squared error between a simulated kinetic trajectory and
+        a user-specified target curve.
+
+        ``target_curve`` maps species name → 1-D array of target concentrations
+        sampled at ``times``.  The simulator is evaluated at the same times,
+        and the per-species MSE is averaged.  When ``normalize=True`` each
+        species term is divided by ``max(|target|)²`` so the cost is
+        dimensionless and species with very different scales contribute
+        comparably.
+        """
+        import numpy as np
+
+        t_eval = np.asarray(times, dtype=float)
+        t_span = (float(t_eval[0]), float(t_eval[-1]))
+        target = {sp: np.asarray(arr, dtype=float) for sp, arr in target_curve.items()}
+
+        def fn(seqs: dict[str, str]) -> float:
+            try:
+                net = network_factory(seqs)
+                sim = net.simulate(initial_conditions, t_span=t_span, t_eval=t_eval)
+            except Exception:
+                return float("inf")
+            if not getattr(sim, "success", False):
+                return float("inf")
+            total = 0.0
+            count = 0
+            for sp, tgt in target.items():
+                arr = sim.concentrations.get(sp)
+                if arr is None:
+                    continue
+                diff = arr[: len(tgt)] - tgt[: len(arr)]
+                if normalize:
+                    scale = float(np.max(np.abs(tgt))) or 1.0
+                    total += float(np.mean((diff / scale) ** 2))
+                else:
+                    total += float(np.mean(diff ** 2))
+                count += 1
+            return total / count if count else 0.0
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [label]
+        return obj
+
+    @classmethod
+    def maximize_kcat(
+        cls,
+        network_factory: Callable[[dict[str, str]], object],
+        species: str,
+        initial_conditions: dict[str, float],
+        t_window: tuple[float, float],
+        weight: float = 1.0,
+        scale: float | None = None,
+        label: str | None = None,
+    ) -> "DesignObjective":
+        """
+        Reward fast accumulation of ``species`` over ``t_window``.
+
+        Score = ``-Δ[species] / Δt`` (in M/s), so lower (more negative) is
+        better — i.e. the optimizer drives the catalytic production rate up.
+        ``scale`` divides the rate to keep the term comparable to other
+        squared-error terms (default: max IC concentration in ``initial_conditions``
+        divided by the window length, so the magnitude is O(1) when the species
+        accumulates a meaningful fraction of the input over the window).
+        """
+        import numpy as np
+
+        lbl = label or f"maximize_kcat({species})"
+        t0, tf = float(t_window[0]), float(t_window[1])
+        dt = max(tf - t0, 1e-30)
+        if scale is None:
+            ic_max = max((abs(v) for v in initial_conditions.values()), default=1.0)
+            scale = max(ic_max / dt, 1e-30)
+
+        def fn(seqs: dict[str, str]) -> float:
+            try:
+                net = network_factory(seqs)
+                sim = net.simulate(initial_conditions, t_span=(t0, tf))
+            except Exception:
+                return float("inf")
+            if not getattr(sim, "success", False):
+                return float("inf")
+            arr = sim.concentrations.get(species)
+            if arr is None or len(arr) < 2:
+                return 0.0
+            rate = float(arr[-1] - arr[0]) / dt
+            return -rate / float(scale)
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [lbl]
+        return obj
+
+    @classmethod
+    def minimize_leak(
+        cls,
+        network_factory: Callable[[dict[str, str]], object],
+        signal_species: str,
+        initial_conditions_no_trigger: dict[str, float],
+        t_window: tuple[float, float],
+        threshold: float = 1e-9,
+        weight: float = 1.0,
+        label: str = "minimize_leak",
+    ) -> "DesignObjective":
+        """
+        Penalize spontaneous accumulation of ``signal_species`` in a control
+        simulation where the trigger / input is set to zero (or to whatever the
+        caller chooses to leave in ``initial_conditions_no_trigger``).
+
+        Score is ``(log10(leak / threshold))²`` when leak > threshold, and 0
+        otherwise — so the gradient grows logarithmically and is well-behaved
+        across many decades of leak rate (the regime the
+        outperform_nupack.md spec calls out: leak < 1e-6 M⁻¹s⁻¹).
+        """
+        t0, tf = float(t_window[0]), float(t_window[1])
+
+        def fn(seqs: dict[str, str]) -> float:
+            try:
+                net = network_factory(seqs)
+                sim = net.simulate(initial_conditions_no_trigger, t_span=(t0, tf))
+            except Exception:
+                return float("inf")
+            if not getattr(sim, "success", False):
+                return float("inf")
+            arr = sim.concentrations.get(signal_species)
+            if arr is None or len(arr) == 0:
+                return 0.0
+            leaked = float(arr[-1])
+            if leaked <= threshold:
+                return 0.0
+            return math.log10(leaked / threshold) ** 2
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [label]
+        return obj
+
+    @classmethod
+    def bistable_threshold(
+        cls,
+        network_factory: Callable[[dict[str, str]], object],
+        parameter: str,
+        param_range: tuple[float, float],
+        species: str,
+        target_threshold: float,
+        initial_conditions: dict[str, float],
+        n_points: int = 21,
+        weight: float = 1.0,
+        label: str | None = None,
+    ) -> "DesignObjective":
+        """
+        Locate the bistable switching threshold along ``parameter`` and
+        penalize its log-deviation from ``target_threshold``.
+
+        The bifurcation is scanned over the log-spaced ``param_range``; the
+        stable-branch maximum of ``species`` is tracked, and the threshold is
+        identified as the first parameter value where that maximum rises above
+        the midpoint between the branch's min and max.  Returns ``inf`` if no
+        crossing is found (i.e. no bistability across the scanned range).
+        """
+        import numpy as np
+
+        lbl = label or f"bistable_threshold({parameter}→{target_threshold:.2g})"
+
+        def fn(seqs: dict[str, str]) -> float:
+            try:
+                net = network_factory(seqs)
+                br = net.bifurcation(
+                    parameter, param_range, n_points=n_points,
+                    initial_conditions=initial_conditions,
+                )
+            except Exception:
+                return float("inf")
+            params = np.asarray(br.parameter_values, dtype=float)
+            values = np.full(len(params), np.nan)
+            for i, ss_list in enumerate(br.steady_states):
+                stable = [s for s in ss_list if s.is_stable]
+                if not stable:
+                    continue
+                values[i] = max(s.concentrations.get(species, 0.0) for s in stable)
+            if np.all(np.isnan(values)):
+                return float("inf")
+            lo = float(np.nanmin(values))
+            hi = float(np.nanmax(values))
+            if hi - lo <= 0.0:
+                return float("inf")
+            mid = (lo + hi) / 2.0
+            crossing = np.where(values >= mid)[0]
+            if len(crossing) == 0:
+                return float("inf")
+            threshold_actual = float(params[crossing[0]])
+            if threshold_actual <= 0.0 or target_threshold <= 0.0:
+                return float("inf")
+            return math.log10(threshold_actual / target_threshold) ** 2
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [lbl]
+        return obj
+
+    @classmethod
+    def from_simulation(
+        cls,
+        network_factory: Callable[[dict[str, str]], object],
+        initial_conditions: dict[str, float],
+        t_span: tuple[float, float],
+        cost_fn: Callable[[object], float],
+        weight: float = 1.0,
+        label: str = "from_simulation",
+    ) -> "DesignObjective":
+        """
+        Escape hatch for arbitrary kinetic cost functions.
+
+        ``cost_fn`` receives the :class:`mantis.SimulationResult` and returns a
+        scalar.  Returns ``inf`` if the simulation fails so the optimizer
+        rejects the candidate cleanly.
+        """
+        def fn(seqs: dict[str, str]) -> float:
+            try:
+                net = network_factory(seqs)
+                sim = net.simulate(initial_conditions, t_span=t_span)
+            except Exception:
+                return float("inf")
+            if not getattr(sim, "success", False):
+                return float("inf")
+            try:
+                return float(cost_fn(sim))
+            except Exception:
+                return float("inf")
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [label]
+        return obj
+
     def __repr__(self) -> str:
         return f"DesignObjective({', '.join(self._labels)})"
