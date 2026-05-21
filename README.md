@@ -1,6 +1,6 @@
 # strider-dna — Nucleic Acid Thermodynamics, Kinetics, and Circuit Design
 
-[![Tests](https://img.shields.io/badge/tests-315%20passed-brightgreen)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-330%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
@@ -713,6 +713,25 @@ print(result.objective_breakdown)
 | `DesignObjective.ensemble_defect(engine, strand_names, target_structure)` | Normalized expected mispaired nucleotides vs target dot-bracket (Zadeh 2011) |
 | `DesignObjective.gc_content(strand_name, target_gc)` | (GC − target)² |
 | `DesignObjective.from_callable(fn)` | Any Python callable returning a float |
+
+**Dynamical (closed-loop) objectives.**  These factories drive optimization
+from a *kinetic* cost: each evaluation rebuilds a mantis `CRNetwork` via the
+caller-supplied `network_factory: (seqs) → CRNetwork` (typically a closure
+over `CircuitBridge.to_crnetwork` or a circuit template's `.to_crnetwork`)
+and runs an ODE simulation or bifurcation scan before returning a scalar.
+They compose with the static objectives under the same `+` / `*` protocol.
+
+| Factory method | What it penalizes |
+|---|---|
+| `DesignObjective.kinetic_trajectory(factory, ic, target_curve, times)` | Normalized MSE between simulated and target concentration trajectories |
+| `DesignObjective.maximize_kcat(factory, species, ic, t_window)` | `−Δ[species]/Δt` (drives the catalytic production rate up) |
+| `DesignObjective.minimize_leak(factory, signal, ic_no_trigger, t_window, threshold)` | `(log10(leak / threshold))²` for a no-trigger control sim above threshold |
+| `DesignObjective.bistable_threshold(factory, parameter, range, species, target)` | `(log10(threshold_actual / target))²` at the bifurcation-scan crossing |
+| `DesignObjective.from_simulation(factory, ic, t_span, cost_fn)` | Escape hatch — arbitrary `cost_fn(SimulationResult) → float` |
+
+See `examples/09_dynamical_design.py` for a complete pipeline; the spec
+behind these factories is item 1 of `outperform_nupack.md` (closed-loop
+dynamical sequence design).
 
 Objectives compose with `+` and scale with `*`:
 
@@ -1589,6 +1608,7 @@ python examples/05_leakage_and_screening.py
 python examples/06_parameter_sweep.py
 python examples/07_cha_to_mantis.py    # requires mantis-delta
 python examples/08_tube_analysis.py
+python examples/09_dynamical_design.py  # requires mantis-delta
 ```
 
 ### `01_dna_thermodynamics.py` — NN model fundamentals
@@ -1630,6 +1650,10 @@ The primary validation example. Demonstrates the complete pipeline:
 ### `08_tube_analysis.py` — Multi-strand equilibrium
 
 Builds two `Tube` objects at different total concentrations (100 nM and 10 μM), enumerates monomers + all dimers via `SetSpec(max_size=2)`, runs `tube_analysis()` once across both tubes, and prints per-species ΔG / equilibrium concentration plus a lazy pair-probability matrix lookup for the heterodimer. Demonstrates the `Strand` / `Complex` / `ComplexSet` / `Tube` / `TubeResult` surface end-to-end.
+
+### `09_dynamical_design.py` — Closed-loop dynamical design
+
+Drives sequence optimization from a *kinetic* cost rather than a static equilibrium defect. Demonstrates the canonical use case from `outperform_nupack.md` item 1: **match a target step-response curve**. A single `A + B <-> AB` hybridization step, with strand A being just the 7-nt designed toehold (no flanking tail), so ΔΔG against the fixed B partner spans ≈ −1 to −8 kcal/mol across all 7-mers — a ≳10⁴× spread in Keq. The example wraps the bridge as a `network_factory: (seqs) → mantis.CRNetwork` closure, uses `DesignObjective.kinetic_trajectory` to score the normalized MSE between the simulated [AB](t) and the target `A₀·(1 − exp(−t/τ))` curve, and lets `SequenceDesigner` find a toehold that matches. Each SA step rebuilds the CRN with the new sequence and reruns the mantis ODE — the feedback loop is honest. The output plot shows three curves (target, baseline `ATATATA` plateauing near 0 nM, optimized reaching ~50% of saturation) alongside a per-trial SA convergence bar chart.
 
 ---
 
