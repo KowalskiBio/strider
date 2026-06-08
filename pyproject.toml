@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strider-dna"
-version = "0.1.0"
+version = "0.2.0"
 description = "Nucleic acid thermodynamics, TMSD kinetics, and sequence design — the biophysics layer below mantis-delta"
 readme = "README.md"
 license = { text = "MIT" }

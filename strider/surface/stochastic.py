@@ -23,10 +23,12 @@ This module adds that physics:
 
         L_D = 2·L_C + k²            (net counts above blank)
 
-    — the exact Currie result for heteroscedastic Poisson counting.  The ``+k²``
-    term is the shot-noise floor: even with perfect electronics (σ_read→0) and a
-    zero blank, you need ``≈ k² ≈ 11`` captured molecules (k = 3.29 for
-    α = β = 0.05) to call a detection at 95 %/95 % confidence.  The
+    — the canonical Currie result for heteroscedastic Poisson counting at
+    k = 1.645 (the z₀.₉₅ quantile, α = β = 0.05), i.e. ``L_D = 3.29·σ₀ + 2.71``.
+    The ``+k²`` term is the shot-noise floor: even with perfect electronics
+    (σ_read→0) and a zero blank, you still need ``L_D = k² ≈ 2.71`` captured
+    molecules — the textbook zero-background counting limit — to call a
+    detection at 95 %/95 % confidence.  The
     :meth:`StochasticSurfaceModel.shot_noise_lod` it produces is therefore higher
     — and more honest — than the deterministic ``SurfaceModel.lod``.
 
@@ -51,8 +53,9 @@ import numpy as np
 from strider.surface.labels import N_A
 from strider.surface.transducer import SurfaceModel, SurfaceParams, captured_count
 
-# Currie coverage factor for α = β = 0.05 (one-sided normal quantile, z_0.95).
-K_CURRIE = 3.29
+# Currie coverage factor k = z_0.95 (one-sided normal quantile) for α = β = 0.05.
+# Gives the canonical L_D = 2·L_C + k² = 3.29·σ₀ + 2.71 counts.
+K_CURRIE = 1.6449
 
 
 @dataclass
