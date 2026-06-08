@@ -1,6 +1,6 @@
 # strider-dna — Nucleic Acid Thermodynamics, Kinetics, and Circuit Design
 
-[![Tests](https://img.shields.io/badge/tests-330%20passed-brightgreen)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-420%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
@@ -37,6 +37,7 @@ Beyond thermodynamics, strider provides a **`Tube` / `ComplexSet` API** for mult
    - [Differentiable thermodynamics (PyTorch)](#16-differentiable-thermodynamics-pytorch)
    - [Export formats](#17-export-formats)
    - [Surface transducer, LOD, and surface ΔG](#18-surface-transducer-lod-and-surface-δg)
+   - [G-quadruplex / aptamer folding](#19-g-quadruplex--aptamer-folding)
 6. [API reference](#api-reference)
 7. [Examples](#examples)
 8. [Backend comparison](#backend-comparison)
@@ -1444,6 +1445,27 @@ sc.tether_offset()       # complex-level configurational-entropy penalty (kcal/m
 
 A dense, charged probe monolayer accumulates counterions (`double_layer_local_salt` → Gouy–Chapman ψ₀ → Boltzmann-enhanced local [Na⁺]), which stabilizes duplexes; pinning one strand-end costs configurational entropy (`tether_dg`, a spacer table + optional ideal-chain term), which destabilizes. The salt part is genuinely per-strand and rides the existing `ThermoEngine(correction_model=…)` hook; the tether part is complex-level and added explicitly to a capture ΔΔG.
 
+### 19. G-quadruplex / aptamer folding
+
+A **G-quadruplex (G4)** is something a Watson–Crick partition function *structurally cannot* represent: four guanine tracts fold into stacked Hoogsteen tetrads around a central column of monovalent cations (K⁺ ≫ Na⁺). NUPACK hardcodes pseudoknots off and models only WC/wobble pairs, so it has no way to express a G4 at all. `strider` adds it as a **competing macrostate** on top of the McCaskill ensemble, with the K⁺/Na⁺ dependence that turns a G4 aptamer into a sensor.
+
+```python
+from strider import fold_quadruplex, quadruplex_ensemble, find_g4_motifs
+
+# Putative-quadruplex-sequence (PQS) recognition — pure sequence pattern
+find_g4_motifs("AGGGTTAGGGTTAGGGTTAGGG")    # → [G4Motif(n_tetrads=3, loops=[3,3,3], ...)]
+
+# Two-state thermodynamics with cation dependence
+f = fold_quadruplex("AGGGTTAGGGTTAGGGTTAGGG", celsius=37, potassium=0.1, sodium=0.0)
+f.dG, f.tm_celsius, f.folded_fraction      # ≈ -2.5 kcal/mol, 57 °C, 0.98 (telomeric G4)
+
+# Duplex/hairpin-vs-G4 equilibrium competition (reuses the rigorous DP)
+e = quadruplex_ensemble("AGGGTTAGGGTTAGGGTTAGGG", potassium=0.1)
+e.p_g4, e.p_secondary                       # population in G4 vs WC structures, sums to 1
+```
+
+The G4 is folded into the partition function as `Z_total = Z_secondary + Σ_g exp(−ΔG_g/RT)·Z_flank(g)`, where `Z_flank(g)` is computed by forcing the tetrad guanines unpaired via the existing `blocked` constraint — so the duplex-vs-G4 competition is exact *within the model* and needs no edit to the core DP. The two-state ΔH/ΔS model has a tract-association nucleation term, a per-tetrad-stack term (more tetrads ⇒ more stable), a loop-length entropic penalty (Guédin, Gros & Mergny 2010), and a Langmuir cation term sized so a G4 is essentially unfolded without stabilizing cation and K⁺ ≫ Na⁺. Reference parameters are fit to canonical melts (c-myc Pu22, telomere 22AG, thrombin-binding aptamer; see `scratch/fit_g4_params.py`). The absolute numbers carry the field's real construct-to-construct spread, but the trends — 3-tetrad > 2-tetrad, short loops > long loops, K⁺ > Na⁺, [cation]↑ ⇒ stabilize — are guaranteed correct. Pairs naturally with §18: a K⁺-gated G4 aptamer's folded fraction drives the surface read-out (see `examples/11_quadruplex_aptamer.py`).
+
 ---
 
 ## API reference
@@ -1536,6 +1558,15 @@ Shared methods:
 | `ReadoutChain(...)` | TIA gain + ADC + averaging → `current_floor_A()`, `charge_floor_C()` |
 | `SurfaceCorrection(...)` | callable `(seq)->float` salt offset for `ThermoEngine(correction_model=…)`; `.tether_offset()` complex-level penalty |
 | `tether_dg`, `double_layer_local_salt`, `debye_length_m` | standalone surface-ΔG primitives |
+
+### G-quadruplex (`strider.structure.quadruplex`)
+
+| Function / class | Description |
+|---|---|
+| `find_g4_motifs(seq, min_tetrads=2, max_tetrads=4, min_loop=1, max_loop=7)` | PQS pattern recognition → `list[G4Motif]` (most stable first) |
+| `g4_thermodynamics(motif, celsius, potassium, sodium)` | two-state `(ΔH, ΔS, ΔG)` of folding into a motif |
+| `fold_quadruplex(seq, celsius, potassium, sodium, …)` | best G4 → `G4Fold(motif, dG, tm_celsius, folded_fraction, structure)` |
+| `quadruplex_ensemble(seq, celsius, material, sodium, magnesium, potassium, …)` | duplex/hairpin-vs-G4 partition competition → `QuadruplexEnsemble(p_g4, p_secondary, …)` |
 
 ### Design helpers
 
@@ -1840,6 +1871,14 @@ Builds two `Tube` objects at different total concentrations (100 nM and 10 μM),
 
 Drives sequence optimization from a *kinetic* cost rather than a static equilibrium defect. Demonstrates the canonical use case from `outperform_nupack.md` item 1: **match a target step-response curve**. A single `A + B <-> AB` hybridization step, with strand A being just the 7-nt designed toehold (no flanking tail), so ΔΔG against the fixed B partner spans ≈ −1 to −8 kcal/mol across all 7-mers — a ≳10⁴× spread in Keq. The example wraps the bridge as a `network_factory: (seqs) → mantis.CRNetwork` closure, uses `DesignObjective.kinetic_trajectory` to score the normalized MSE between the simulated [AB](t) and the target `A₀·(1 − exp(−t/τ))` curve, and lets `SequenceDesigner` find a toehold that matches. Each SA step rebuilds the CRN with the new sequence and reruns the mantis ODE — the feedback loop is honest. The output plot shows three curves (target, baseline `ATATATA` plateauing near 0 nM, optimized reaching ~50% of saturation) alongside a per-trial SA convergence bar chart.
 
+### `10_domain_enumeration.py` — Template-free reaction enumeration
+
+Reads strand topology in domain space and *derives* the reachable complexes plus the bind / 3-way branch-migration / open transitions (the Visual DSD / Peppercorn job), assigns detailed-balance rates from the active `ThermoEngine`, and hands back a simulable mantis `CRNetwork`. Runs end-to-end on a textbook TMSD.
+
+### `11_quadruplex_aptamer.py` — K⁺-gated G-quadruplex → electrochemical read-out
+
+Chains `fold_quadruplex` / `quadruplex_ensemble` (the §19 G4 layer) into the §18 surface transducer: the K⁺-dependent folded fraction of a telomeric G4 aptamer sets how many tethered redox reporters are in the signal-ON conformation, producing a [K⁺] calibration curve in nA. The whole transduction mechanism — G4 folding — is one NUPACK structurally cannot represent.
+
 ---
 
 ## Backend comparison
@@ -1880,7 +1919,7 @@ pip install -e .[dev]
 pytest tests/ -v
 ```
 
-The test suite has **319 tests, all green** (1 skipped — a mantis-integration test when mantis-delta is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
+The test suite has **420 tests, all green** (1 skipped — a torch/mantis-integration test when the optional dep is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
 
 | File | Tests | What is covered |
 |---|---|---|
@@ -1904,6 +1943,7 @@ The test suite has **319 tests, all green** (1 skipped — a mantis-integration 
 | `test_cotranscriptional.py` | 9 | Prefix-by-prefix folding trajectory, rearrangement detection |
 | `test_cli.py` | 14 | `strider fold/pfunc/duplex/melt/cotx`, JSON output, stdin / @file sequence input |
 | `test_differentiable.py` | 4 | `ThermoParameters` init, batched forward, backward-gradient propagation, toy training step |
+| `test_quadruplex.py` | 22 | PQS motif recognition, two-state G4 ΔH/ΔS/Tm, stability/loop/tetrad ordering, K⁺>Na⁺ cation dependence, folded fraction, duplex-vs-G4 partition competition |
 
 > **Note:** tests requiring `mantis-delta` are skipped if it is not installed (install via `pip install -e ../mantis` for editable mode).
 

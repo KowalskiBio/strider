@@ -37,6 +37,15 @@ from strider.structure.mfe import fold_mfe
 from strider.structure.sampling import sample_structures, subopt_structures
 from strider.structure.dot_bracket import parse_pairs, to_dot_bracket, validate
 from strider.structure.pseudoknot import fold_pseudoknot
+from strider.structure.quadruplex import (
+    find_g4_motifs,
+    fold_quadruplex,
+    g4_thermodynamics,
+    quadruplex_ensemble,
+    G4Motif,
+    G4Fold,
+    QuadruplexEnsemble,
+)
 from strider.structure.mountain import mountain_vector, compare_structures
 from strider.structure.cotranscriptional import (
     fold_cotranscriptional,
@@ -129,6 +138,8 @@ __all__ = [
     "fold_mfe", "fold_pseudoknot", "sample_structures", "subopt_structures",
     "parse_pairs", "to_dot_bracket", "validate",
     "mountain_vector", "compare_structures",
+    "find_g4_motifs", "fold_quadruplex", "g4_thermodynamics", "quadruplex_ensemble",
+    "G4Motif", "G4Fold", "QuadruplexEnsemble",
     # Kinetics
     "toehold_kf", "displacement_kf", "leakage_kf", "rates_from_ddg",
     "TMSDRateSet", "TMSDKineticModel",
