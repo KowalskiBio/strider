@@ -94,6 +94,8 @@ from strider.surface import (
     SurfaceModel, SurfaceParams, TransduceResult,
     LabelModel, PrussianBlueLabel, ReadoutChain,
     SurfaceCorrection, tether_dg, double_layer_local_salt, debye_length_m,
+    StochasticSurfaceModel, CurrieLevels, CaptureSamples,
+    currie_levels, detection_probability,
 )
 
 from strider.bridge.mantis_bridge import (
@@ -122,7 +124,7 @@ from strider.circuits import (
     no_spurious_dimer, leakage_below_signal,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Emilio Venegas"
 __license__ = "MIT"
 
@@ -161,6 +163,8 @@ __all__ = [
     "SurfaceModel", "SurfaceParams", "TransduceResult",
     "LabelModel", "PrussianBlueLabel", "ReadoutChain",
     "SurfaceCorrection", "tether_dg", "double_layer_local_salt", "debye_length_m",
+    "StochasticSurfaceModel", "CurrieLevels", "CaptureSamples",
+    "currie_levels", "detection_probability",
     # Bridge to mantis
     "CHABridge", "CHAVerificationReport", "CircuitBridge", "rates_to_crnetwork",
     # Sweep & cache

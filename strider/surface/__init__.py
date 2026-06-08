@@ -13,6 +13,10 @@ subpackage adds the surface physics clinical biosensors actually run on:
   * :mod:`strider.surface.thermo` — tether-entropy and double-layer/local-salt
     ΔG corrections that warp bulk hybridization at a surface; the salt part plugs
     into ``ThermoEngine(correction_model=…)``.
+  * :mod:`strider.surface.stochastic` — low-copy capture shot noise: Poisson
+    counting statistics, the Currie detection-limit framework, and a mantis
+    Gillespie SSA driver — the regime where counting noise, not the electronics,
+    sets the limit of detection.
 """
 
 from strider.surface.labels import (
@@ -27,11 +31,18 @@ from strider.surface.thermo import (
     SurfaceCorrection, tether_dg, double_layer_local_salt, debye_length_m,
     SPACER_TETHER_DG,
 )
+from strider.surface.stochastic import (
+    StochasticSurfaceModel, CurrieLevels, CaptureSamples,
+    currie_levels, detection_probability, readout_sigma_counts, K_CURRIE,
+)
 
 __all__ = [
     # transducer
     "SurfaceModel", "SurfaceParams", "TransduceResult",
     "shoup_szabo_f", "captured_count",
+    # low-copy stochastic capture (shot-noise-limited detection)
+    "StochasticSurfaceModel", "CurrieLevels", "CaptureSamples",
+    "currie_levels", "detection_probability", "readout_sigma_counts", "K_CURRIE",
     # labels
     "LabelModel", "PrussianBlueLabel", "ReadoutChain",
     "pbnp_redox_centres", "pb_addressable_fraction",
