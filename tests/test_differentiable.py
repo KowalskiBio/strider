@@ -1,16 +1,25 @@
+import random
+
 import pytest
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
 
-from strider.thermo.differentiable import ThermoParameters, BatchedPartitionFunction
+from strider.thermo.differentiable import (
+    ThermoParameters,
+    BatchedPartitionFunction,
+    batched_free_energy,
+)
+from strider import ThermoEngine
 
 def test_differentiable_parameters_init():
     """Test that ThermoParameters initializes correctly with expected dimensions and default weights."""
     params_rna = ThermoParameters(material="rna")
     assert params_rna.material == "rna"
-    assert params_rna.stack_dG37.shape == (16,)
+    # Full 4-base stack table (36 populated entries in a 256-slot tensor),
+    # replacing the old 16-entry Watson-Crick dinucleotide table.
+    assert params_rna.stack_table.shape == (256,)
     assert params_rna.term_mismatch.shape == (256,)
     assert params_rna.dangle_3.shape == (64,)
     assert params_rna.dangle_5.shape == (64,)
@@ -55,8 +64,8 @@ def test_differentiable_backward_gradients():
     loss.backward()
     
     # Check that basic parameters have valid gradients
-    assert params.stack_dG37.grad is not None
-    assert not torch.isnan(params.stack_dG37.grad).any()
+    assert params.stack_table.grad is not None
+    assert not torch.isnan(params.stack_table.grad).any()
     
     assert params.term_mismatch.grad is not None
     assert not torch.isnan(params.term_mismatch.grad).any()
@@ -69,7 +78,7 @@ def test_differentiable_backward_gradients():
     assert not torch.isnan(params.mlp_1_2[-1].weight.grad).any()
     
     # Assert specific parameters get non-zero updates
-    assert params.stack_dG37.grad.norm() > 0.0
+    assert params.stack_table.grad.norm() > 0.0
 
 
 def test_toy_training_step():
@@ -98,7 +107,7 @@ def test_toy_training_step():
     loss = criterion(pred_energies, true_energies)
     
     # Gentle physical regularizer to anchor baseline parameters
-    reg_loss = 0.1 * torch.sum(params.stack_dG37 ** 2)
+    reg_loss = 0.1 * torch.sum(params.stack_table ** 2)
     total_loss = loss + reg_loss
     
     total_loss.backward()
@@ -106,3 +115,69 @@ def test_toy_training_step():
     
     assert loss.item() >= 0.0
     assert not torch.isnan(loss)
+
+
+def _random_seqs(alphabet, lengths, reps, seed):
+    rng = random.Random(seed)
+    return [
+        "".join(rng.choice(alphabet) for _ in range(n))
+        for n in lengths for _ in range(reps)
+    ]
+
+
+@pytest.mark.parametrize("material,alphabet", [("rna", "ACGU"), ("dna", "ACGT")])
+def test_matches_native_within_tolerance(material, alphabet):
+    """
+    The differentiable engine must agree with the authoritative native engine.
+    This is the alignment gate: wiring the full 36-entry stack table + the
+    single-base-bulge stack-across term brought the residual on random sequences
+    from ~0.7 (max ~4.5) kcal/mol down to ~0.3 (max ~1.0).
+    """
+    eng = ThermoEngine(material=material, celsius=37.0)
+    seqs = _random_seqs(alphabet, (8, 12, 16, 20, 24, 30), reps=3, seed=0)
+    diff = batched_free_energy(seqs, material=material).tolist()
+    native = [eng.pfunc(s).free_energy for s in seqs]
+    errs = [abs(d - n) for d, n in zip(diff, native)]
+    mean_err = sum(errs) / len(errs)
+    assert mean_err < 0.5, f"{material} mean |err|={mean_err:.3f}"
+    assert max(errs) < 1.5, f"{material} max |err|={max(errs):.3f}"
+
+
+def test_gu_wobble_helix_not_overstabilized():
+    """
+    Regression for the core bug: GU-wobble helices were scored with Watson-Crick
+    dinucleotide stack energies (the old 16-entry table), over-stabilizing by
+    several kcal/mol.  This sequence was ~4.5 kcal/mol too negative before the fix.
+    """
+    eng = ThermoEngine(material="rna", celsius=37.0)
+    seq = "CAGUGGUAAUUGGAUAUUAG"
+    diff = batched_free_energy([seq], material="rna").item()
+    native = eng.pfunc(seq).free_energy
+    assert abs(diff - native) < 1.0
+
+
+def test_full_stack_table_has_wobble_entries():
+    """The stack table is the full 36-entry NN table, not the 16 WC dinucleotides."""
+    p = ThermoParameters(material="rna")
+    assert p.stack_table.shape == (256,)
+    # GU/UG-containing stacks must differ from the default fill (i.e. populated).
+    default = -2.0
+    populated = (p.stack_table != default).sum().item()
+    assert populated >= 30  # 36 entries, minus any that happen to equal -2.0
+
+
+def test_batched_free_energy_helper_matches_model():
+    seqs = ["GGGCUUCGGCCC", "AUGCAUGC", "GCGCGC"]
+    helper = batched_free_energy(seqs, material="rna").tolist()
+    model = BatchedPartitionFunction(ThermoParameters(material="rna"))
+    with torch.no_grad():
+        direct = model(seqs).tolist()
+    assert helper == pytest.approx(direct, abs=1e-9)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_cuda_matches_cpu():
+    seqs = ["GGGCUUCGGCCCAAA", "AUGCAUGCUAGC", "GCGCGCAU"]
+    cpu = batched_free_energy(seqs, material="rna", device="cpu").tolist()
+    cuda = batched_free_energy(seqs, material="rna", device="cuda").cpu().tolist()
+    assert cuda == pytest.approx(cpu, abs=1e-6)

@@ -64,7 +64,7 @@ def main():
     model = BatchedPartitionFunction(params).to(device)
     
     # Store original parameters for comparison
-    true_stack = params.stack_dG37.clone().detach()
+    true_stack = params.stack_table.clone().detach()
     true_term = params.term_mismatch.clone().detach()
     true_hp = params.hairpin_sizes.clone().detach()
     true_ml_base = torch.exp(params.ml_base_raw).clone().detach()
@@ -78,7 +78,7 @@ def main():
     
     # Perturb the parameters to simulate "bad" initialization
     with torch.no_grad():
-        params.stack_dG37 += 1.0
+        params.stack_table += 1.0
         params.term_mismatch -= 0.5
         params.hairpin_sizes += 0.5
         params.ml_base_raw += 0.2
@@ -92,7 +92,7 @@ def main():
         
     def param_mse_tensor():
         return (
-            torch.nn.functional.mse_loss(params.stack_dG37, true_stack) +
+            torch.nn.functional.mse_loss(params.stack_table, true_stack) +
             torch.nn.functional.mse_loss(params.term_mismatch, true_term) +
             torch.nn.functional.mse_loss(params.hairpin_sizes, true_hp) +
             torch.nn.functional.mse_loss(torch.exp(params.ml_base_raw), true_ml_base) +
@@ -158,9 +158,9 @@ def main():
             # Gentle physical anchor to prevent parameter inflation
             reg_loss = 0.2 * param_mse_tensor()
             
-            # Anchor global stacking array: increase L2 penalty on stack_dG37 during final iterations
+            # Anchor global stacking array: increase L2 penalty on stack_table during final iterations
             if epoch >= epochs - 5:
-                reg_loss += 0.5 * torch.sum((model.params.stack_dG37 - true_stack)**2)
+                reg_loss += 0.5 * torch.sum((model.params.stack_table - true_stack)**2)
                 
             total_batch_loss = loss + reg_loss
             
@@ -200,7 +200,8 @@ def main():
         
     print("\nTraining complete!")
     print("Gradient check on various parameters:")
-    print(f"  AATT stack -> True: {true_stack[params.dinuc_to_idx.get('AA', 0)]:.4f}, Learned: {params.stack_dG37[params.dinuc_to_idx.get('AA', 0)].item():.4f}")
+    aauu = 0 * 64 + 0 * 16 + 3 * 4 + 3  # 5'-AA-3'/3'-UU-5' stack
+    print(f"  AAUU stack -> True: {true_stack[aauu]:.4f}, Learned: {params.stack_table[aauu].item():.4f}")
     print(f"  ML Base -> True: {true_ml_base.item():.4f}, Learned: {torch.exp(params.ml_base_raw).item():.4f}")
     print(f"  Hairpin Size 4 -> True: {true_hp[4]:.4f}, Learned: {params.get_hairpin_size_energy(4).item():.4f}")
     print(f"  Interior Size 3 -> True: {true_int[2]:.4f}, Learned: {params.interior_sizes[2].item():.4f}")
