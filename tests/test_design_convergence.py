@@ -201,6 +201,81 @@ class TestEnsembleDefectTubeObjective:
         assert score >= 0.0
 
 
+# ─── DesignObjective.multitube_defect (multistate design) ────────────────────
+
+
+class TestMultitubeDefectObjective:
+    def _duplex_tube_factory(self, material="dna"):
+        def factory(seqs):
+            A = Strand("A", seqs["A"], material=material)
+            B = Strand("B", seqs["B"], material=material)
+            cset = ComplexSet([A, B], SetSpec(max_size=2))
+            return Tube(strand_totals={A: 1e-6, B: 1e-6}, complexes=cset)
+        return factory
+
+    def test_single_tube_matches_tube_ensemble_defect(self, engine_1m):
+        factory = self._duplex_tube_factory()
+        struct = "(((((((((())))))))))"
+        obj = DesignObjective.multitube_defect(
+            engine_1m, tubes=[(factory, [("A_B", struct, 1e-6)])]
+        )
+        seqs = {"A": "ACGTACGTAC", "B": "GTACGTACGT"}
+        score = obj(seqs)
+        direct = factory(seqs).analyze(engine_1m).tube_ensemble_defect(
+            [("A_B", struct, 1e-6)]
+        )
+        assert score == pytest.approx(direct, rel=1e-9)
+        assert 0.0 <= score <= 1.0 + 1e-9
+
+    def test_two_tubes_sum(self, engine_1m):
+        factory = self._duplex_tube_factory()
+        struct = "(((((((((())))))))))"
+        spec = (factory, [("A_B", struct, 1e-6)])
+        one = DesignObjective.multitube_defect(engine_1m, tubes=[spec])
+        two = DesignObjective.multitube_defect(engine_1m, tubes=[spec, spec])
+        seqs = {"A": "ACGTACGTAC", "B": "GTACGTACGT"}
+        assert two(seqs) == pytest.approx(2.0 * one(seqs), rel=1e-9)
+
+    def test_tube_weights(self, engine_1m):
+        factory = self._duplex_tube_factory()
+        struct = "(((((((((())))))))))"
+        spec = (factory, [("A_B", struct, 1e-6)])
+        obj = DesignObjective.multitube_defect(
+            engine_1m, tubes=[spec, spec], tube_weights=[0.25, 0.75]
+        )
+        base = DesignObjective.multitube_defect(engine_1m, tubes=[spec])
+        seqs = {"A": "ACGTACGTAC", "B": "GTACGTACGT"}
+        assert obj(seqs) == pytest.approx(base(seqs), rel=1e-9)
+
+    def test_mismatched_weights_raise(self, engine_1m):
+        factory = self._duplex_tube_factory()
+        spec = (factory, [("A_B", "(((((((((())))))))))", 1e-6)])
+        with pytest.raises(ValueError, match="tube_weights"):
+            DesignObjective.multitube_defect(
+                engine_1m, tubes=[spec], tube_weights=[1.0, 1.0]
+            )
+
+    def test_failed_solve_returns_inf(self, engine_1m):
+        def bad_factory(seqs):
+            raise RuntimeError("equilibrium blew up")
+        obj = DesignObjective.multitube_defect(
+            engine_1m, tubes=[(bad_factory, [("A_B", "..", 1e-6)])]
+        )
+        assert obj({"A": "ACGT", "B": "ACGT"}) == float("inf")
+
+    def test_optimal_beats_random_under_design(self, engine_1m):
+        # The objective must rank the reverse-complement (duplex-forming) pair
+        # below a non-binding pair — i.e. it points the optimiser the right way.
+        factory = self._duplex_tube_factory()
+        struct = "(((((((((())))))))))"
+        obj = DesignObjective.multitube_defect(
+            engine_1m, tubes=[(factory, [("A_B", struct, 1e-6)])]
+        )
+        optimal = obj({"A": "ACGTACGTAC", "B": "GTACGTACGT"})
+        nonbinding = obj({"A": "AAAAAAAAAA", "B": "AAAAAAAAAA"})
+        assert optimal < nonbinding
+
+
 # ─── Assay equilibrium mode ─────────────────────────────────────────────────
 
 

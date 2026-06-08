@@ -53,23 +53,20 @@ class TestUnpairedMarginalIdentity:
         # the outside enclosed terms must re-apply the per-pair salt factor
         assert _marginal_max_error(seq, material, sodium=0.137, magnesium=0.01) < 1e-9
 
-    def test_multistrand_marginals_consistent_away_from_nick(self):
-        # Multi-strand pair probabilities are exact except at the immediate
-        # nick-junction pair (i, i+1) across a strand boundary, where the coaxial
-        # closing pair is slightly over-counted (a documented residual, see
-        # ensemble._pair_probs_outside).  Away from the junction the unpaired-
-        # marginal identity holds tightly.
+    def test_multistrand_marginals_exact_including_nick(self):
+        # Multi-strand pair probabilities are the exact adjoint of the inside
+        # recurrence at EVERY position, including the two bases flanking the nick
+        # (the immediate nick-junction pair i, i+1 across a strand boundary).
+        # The unpaired-marginal identity therefore holds to numerical precision
+        # everywhere — no nick-flank exemption.
         s1, s2 = "GGGAAAGGG", "CCCAAACCC"
         _, P = multistrand_pairs([s1, s2], 37.0, "rna")
         Znd = dangle_free_partition(sequences=[s1, s2], material="rna")
         n = len(s1) + len(s2)
-        nick = len(s1)
         for i in range(n):
-            if i in (nick - 1, nick):       # bases flanking the nick
-                continue
             Zb = dangle_free_partition(sequences=[s1, s2], material="rna", blocked={i})
             s = sum(P[i][j] for j in range(n) if j != i)
-            assert abs(s + Zb / Znd - 1.0) < 1e-3
+            assert abs(s + Zb / Znd - 1.0) < 1e-9
 
     def test_multistrand_bounds(self):
         s1, s2 = "AUGGGCAU", "AUGCCCAU"

@@ -8,7 +8,7 @@
 
 strider ships a two-backend thermodynamic engine that automatically selects the best available calculator: its own Zuker / McCaskill O(n³) DP (always available, MIT, sourced from SantaLucia 2004 + Mathews 1999 / Turner 2004 primary tables) or the ViennaRNA C library (optional, recommended for long sequences). The same API surface works with both — only `ThermoEngine(backend=…)` changes. Nearest-neighbor parameters live in a swappable `ParameterSet` that loads from Turner-style JSON files (built-in "native" set always available; user-supplied JSON discoverable via `$STRIDER_PARAMS_DIR`).
 
-Beyond thermodynamics, strider provides a **`Tube` / `ComplexSet` API** for multi-strand equilibrium analysis (concentrations, free energies, lazy pair-probability matrices, ensemble defect — see [§7](#7-multi-strand-tube-analysis)), a **circuit catalog** of ready-made DSD templates (CHA, HCR, seesaw gates, translators) wrapped around a generic verification framework, a **pure-thermo concentration solver** matching standard Newton-on-chemical-potentials (Dirks et al. 2007) to numerical precision, **Boltzmann sampling** and **suboptimal-structure enumeration** on top of the partition function, an **`Assay` / `AssayPanel`** design abstraction for ensemble-defect minimization (built on top of the unified `Complex` primitive) plus a **defect-weighted, parallel-tempered sequence designer** with leaf decomposition and equilibrium-weighted objectives (see [§8](#8-sequence-design-and-the-assay-abstraction)), a lightweight **`DSDCompiler`** for domain-level sequence assembly, and — via the companion **mantis** library — Gillespie SSA stochastic simulation in addition to deterministic ODE integration.
+Beyond thermodynamics, strider provides a **`Tube` / `ComplexSet` API** for multi-strand equilibrium analysis (concentrations, free energies, lazy pair-probability matrices, ensemble defect — see [§7](#7-multi-strand-tube-analysis)), a **circuit catalog** of ready-made DSD templates (CHA, HCR, seesaw gates, translators) wrapped around a generic verification framework, a **pure-thermo concentration solver** matching standard Newton-on-chemical-potentials (Dirks et al. 2007) to numerical precision, **Boltzmann sampling** and **suboptimal-structure enumeration** on top of the partition function, an **`Assay` / `AssayPanel`** design abstraction for ensemble-defect minimization (built on top of the unified `Complex` primitive) plus a **defect-weighted, parallel-tempered sequence designer** with leaf decomposition and equilibrium-weighted objectives (see [§8](#8-sequence-design-and-the-assay-abstraction)), a lightweight **`DSDCompiler`** for domain-level sequence assembly plus a **`DomainReactionEnumerator`** that *derives* a circuit's reaction network from strand topology (Peppercorn-style: bind / branch-migration / open → detailed-balance rates → CRN), and — via the companion **mantis** library — Gillespie SSA stochastic simulation in addition to deterministic ODE integration.
 
 ---
 
@@ -713,9 +713,19 @@ print(result.objective_breakdown)
 | `DesignObjective.ddg_range(engine, reactants, products, min, max)` | ΔΔG outside [min, max] |
 | `DesignObjective.minimize_leakage(engine, strand_names, threshold)` | Pairwise ΔΔG below threshold |
 | `DesignObjective.toehold_accessible(engine, strand_name, positions, min_prob)` | Low toehold accessibility |
-| `DesignObjective.ensemble_defect(engine, strand_names, target_structure)` | Normalized expected mispaired nucleotides vs target dot-bracket (Zadeh 2011) |
+| `DesignObjective.ensemble_defect(engine, strand_names, target_structure)` | Normalized expected mispaired nucleotides vs target dot-bracket (Zadeh 2011) — NUPACK `complex_design` |
+| `DesignObjective.multitube_defect(engine, tubes, tube_weights=None)` | Weighted sum of the **test-tube ensemble defect** (structural + concentration defect) over N tubes — NUPACK `tube_design` (1 tube) / multistate design (N tubes); see below |
 | `DesignObjective.gc_content(strand_name, target_gc)` | (GC − target)² |
 | `DesignObjective.from_callable(fn)` | Any Python callable returning a float |
+
+**Multistate / multi-tube design (`multitube_defect`).** This is the equilibrium-aware analogue of `ensemble_defect`, matching NUPACK's `tube_design` and multistate test-tube design. Each *tube* is given as `(tube_factory, on_targets)`, where `tube_factory(seqs) → Tube` rebuilds the tube from the current sequences and `on_targets` is a list of `(complex_canonical_name, target_dot_bracket, target_concentration_M)`. For every tube the optimizer runs a real equilibrium solve and scores the normalized [test-tube ensemble defect](https://docs.nupack.org) `TubeResult.tube_ensemble_defect`:
+
+```
+C_tube = ( Σ_h c_h·ñ(h, s_h)  +  Σ_h |h|·max(0, c_h* − c_h) ) / ( Σ_h |h|·c_h* )
+          └── structural defect ──┘   └── concentration defect ──┘
+```
+
+The **structural** term is each on-target complex's equilibrium concentration `c_h` times its *unnormalized* ensemble defect; the **concentration** term penalizes on-target material that failed to form at its target concentration `c_h*` because the strands were sequestered in off-targets. Off-targets need no explicit list or ΔΔG threshold — they are simply every non-on-target complex in the tube, and the equilibrium solve has already distributed strands among them. The multi-tube objective is `Σ_t tube_weights[t]·C_tube(t)`, so a single tube reproduces `tube_design` and several tubes give true multistate design. A tube whose solve raises contributes `+inf` (the SA move is rejected).
 
 **Dynamical (closed-loop) objectives.**  These factories drive optimization
 from a *kinetic* cost: each evaluation rebuilds a mantis `CRNetwork` via the
@@ -1120,6 +1130,27 @@ rn = bridge.to_crnetwork()
 ```
 
 The compiler intentionally does *not* infer reactions from strand topology — you still write them explicitly. The job is to keep the symbolic layer (domains, strands) in sync with the sequence layer.
+
+#### Deriving the reactions automatically — `DomainReactionEnumerator`
+
+When you *don't* want to write the reactions by hand, `DomainReactionEnumerator` does the Visual DSD / Peppercorn job: it reads the strand topology and enumerates the reachable complexes plus the transitions between them — **bind** (a complementary toehold pair, one per complex, hybridises and merges), **3-way branch migration** (an unbound domain adjacent to a junction displaces an identical incumbent), and **open** (a toehold-length helix dissociates). Forward rates come from the Zhang–Winfree model; reverse rates from **detailed balance** against the helix ΔG computed by the active `ThermoEngine` (so `Keq = kf/kr = exp(−ΔG/RT)`). The result drops straight into a `mantis.CRNetwork`.
+
+```python
+from strider import ThermoEngine, DomainReactionEnumerator
+
+enum = DomainReactionEnumerator(
+    domains={'t': 'CCCT', 'b': 'ACGTACGTACGT'},   # t = 4-nt toehold, b = branch
+    engine=ThermoEngine(material='dna'),
+)
+result = enum.enumerate(
+    strands={'Invader': ['t', 'b'], 'Output': ['b'], 'Base': ['b*', 't*']},
+    initial_complexes=[['Output', 'Base']],        # substrate starts hybridised
+)
+print(result.summary())          # derived complexes + reactions + rates
+crn = result.to_crnetwork()      # → mantis.CRNetwork, ready to simulate
+```
+
+This enumerates the canonical TMSD network — *Invader* binds the *Output·Base* substrate via the toehold, branch-migrates along `b`, and releases *Output* — with no hand-written reactions. Scope (v1): non-pseudoknotted, 3-way only; 4-way migration and intramolecular hairpin re-closure are not modelled, and `max_complexes`/`max_strands` caps guarantee termination on polymerising motifs. See `examples/10_domain_enumeration.py`.
 
 ---
 
@@ -1823,7 +1854,7 @@ The `native` backend uses strider's own Zuker MFE and McCaskill O(n³) partition
 
 Reproduce with `python scripts/bench_mfe.py`.
 
-**Accuracy.** Stack energies match the source papers exactly (SantaLucia 2004 AA/TT = −1.00 kcal/mol, CG/CG = −2.17, GC/GC = −2.24; Mathews 1999 AU/UA = −0.93). The McCaskill outside recurrence is the exact adjoint of the inside DP: single-strand pair probabilities satisfy the unpaired-marginal identity to numerical precision (incl. multiloop-enclosed pairs, which the partition function now scores with a correct ≥2-branch multiloop closure — no stacked-helix double-count and with leading-unpaired bases). Multi-strand matrices are consistent everywhere except the immediate nick-junction pair (a small coaxial-junction residual).
+**Accuracy.** Stack energies match the source papers exactly (SantaLucia 2004 AA/TT = −1.00 kcal/mol, CG/CG = −2.17, GC/GC = −2.24; Mathews 1999 AU/UA = −0.93). The McCaskill outside recurrence is the exact adjoint of the inside DP: pair probabilities satisfy the unpaired-marginal identity to numerical precision (incl. multiloop-enclosed pairs, which the partition function now scores with a correct ≥2-branch multiloop closure — no stacked-helix double-count and with leading-unpaired bases). This holds for **single- and multi-strand** complexes alike — the immediate nick-junction pair straddling a strand boundary is exact too, validated against a brute-force enumeration of the model.
 
 **Optional Vienna backend.** If `ViennaRNA` is installed and you set `backend='vienna'`, strider routes MFE / pfunc to RNA.fold / RNA.pf_fold. Use it for production-quality folding of sequences > ~200 nt where native runtime becomes the bottleneck. The Tube/ComplexSet API, leakage enumeration, kinetics, and design pipelines work identically on top of either backend.
 
@@ -1891,7 +1922,7 @@ Running `pip install -e .` from a parent directory will not work.
 
 ### Multi-strand pair probabilities near a nick
 
-The native McCaskill outside recurrence is now the exact adjoint of the inside recurrence: **single-strand** pair probabilities (and `TubeResult.defect`) satisfy the unpaired-marginal identity `Σ_j P(i,j) = 1 − P_unpaired(i)` to numerical precision, including pairs inside multiloops (previously underestimated). For **multi-strand** complexes one narrow case remains approximate — the immediate nick-junction pair `(i, i+1)` straddling a strand boundary (the coaxial closing pair) is slightly over-counted; every other position is consistent and no entry grossly exceeds 1.0. Equilibrium concentrations and free energies are unaffected (they consume ΔG only).
+The native McCaskill outside recurrence is the exact adjoint of the inside recurrence: pair probabilities (and `TubeResult.defect`) satisfy the unpaired-marginal identity `Σ_j P(i,j) = 1 − P_unpaired(i)` to numerical precision, including pairs inside multiloops (previously underestimated). This now holds for **single- and multi-strand** complexes at **every** position — the immediate nick-junction pair `(i, i+1)` straddling a strand boundary (the coaxial closing pair) is exact too. The earlier over-count there was an artifact of the *constrained* (unpaired-marginal) partition, not the pair probabilities: forcing a position unpaired must not flip the inter-strand terminal-penalty leaf gate, which is a sequence-only model-shape decision. Validated against an exact brute-force enumeration of the model. Equilibrium concentrations and free energies are unaffected (they consume ΔG only).
 
 ### `CHA().verify()` fails spontaneous leakage check
 

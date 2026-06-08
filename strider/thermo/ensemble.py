@@ -597,7 +597,16 @@ def _qb_val(seq, i, j, Q, Qb, QM, QM1, T, pairs, material, nicks,
 
     # ── Terminal pair penalty for outermost inter-strand pair ─────────────────
     # Applied once per helix terminus (SantaLucia 1998 terminal-pair penalty).
-    if is_inter and not _can_pair_nicks(seq, i + 1, j - 1, pairs, nicks, blocked):
+    # The gate is a *model-shape* decision — "is the immediate inner (i+1, j-1)
+    # pairable by sequence?" — so it must NOT consult ``blocked``.  ``blocked`` is
+    # an external marginal constraint; letting it flip this gate would activate a
+    # terminal-penalty leaf for an enclosing inter-strand pair whose inner became
+    # unpairable only because of the constraint, fabricating structures that carry
+    # zero weight in the true ensemble (over-counting the blocked partition near a
+    # nick).  Sequence-only gating keeps the constrained partition a faithful
+    # restriction of the unconstrained one, so the unpaired-marginal identity
+    # holds to numerical precision at the nick junction too.
+    if is_inter and not _can_pair_nicks(seq, i + 1, j - 1, pairs, nicks):
         val += _boltzmann(_terminal_pair_penalty(seq, i, j, material), T)
 
     # ── Stack: adjacent inner pair (i+1, j-1) ─────────────────────────────────
@@ -746,15 +755,12 @@ def _pair_probs_outside(
 
     Implements the external context, stack propagation, interior-loop / bulge
     propagation, **and** the multiloop outside contribution — so pairs inside a
-    multiloop are no longer underestimated.  For single strands the result is the
-    exact adjoint of the inside recurrence and satisfies the unpaired-marginal
-    identity Σ_j P(i,j) = 1 − P_unpaired(i) to numerical precision (validated in
-    tests/test_pair_probs.py).
-
-    Known residual: for multi-strand complexes the *immediate nick-junction pair*
-    (i, i+1) straddling a strand boundary — the coaxial closing pair — is slightly
-    over-counted; all other positions remain consistent.  This is a narrow coaxial-
-    junction edge case and does not affect single-strand probabilities.
+    multiloop are no longer underestimated.  The result is the exact adjoint of the
+    inside recurrence — for single-strand **and** multi-strand complexes alike — and
+    satisfies the unpaired-marginal identity Σ_j P(i,j) = 1 − P_unpaired(i) to
+    numerical precision at every position, including the immediate nick-junction
+    pair (i, i+1) straddling a strand boundary (validated in
+    tests/test_pair_probs.py against an exact brute-force enumeration of the model).
     """
     Pp = np.zeros((n, n))
     if Z <= 0:

@@ -59,6 +59,11 @@ from strider.kinetics.arrhenius import (
     ddg_from_k_eq,
 )
 from strider.kinetics.leakage import LeakageEnumerator, LeakageReport, SpuriousReaction
+from strider.kinetics.enumerator import (
+    DomainReactionEnumerator,
+    EnumerationResult,
+    DomainReaction,
+)
 
 from strider.design.objective import DesignObjective
 from strider.design.constraints import HardConstraint
@@ -129,6 +134,7 @@ __all__ = [
     "TMSDRateSet", "TMSDKineticModel",
     "arrhenius", "detailed_balance_kr", "k_eq_from_ddg", "ddg_from_k_eq",
     "LeakageEnumerator", "LeakageReport", "SpuriousReaction",
+    "DomainReactionEnumerator", "EnumerationResult", "DomainReaction",
     # Design
     "DesignObjective", "HardConstraint",
     "SequenceDesigner", "DomainSpec", "DesignResult",

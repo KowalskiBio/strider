@@ -464,6 +464,69 @@ class TubeResult:
         cx = self.complexes[complex_name]
         return self._engine.ensemble_defect(cx.sequences, target_structure)
 
+    def tube_ensemble_defect(
+        self,
+        on_targets: "list[tuple[str, str, float]]",
+        normalize: bool = True,
+    ) -> float:
+        """
+        Normalized **test-tube ensemble defect** (Wolfe & Pierce 2015,
+        J. Comput. Chem. 36:255-269; Fornace, Porubsky & Pierce 2020,
+        ACS Synth. Biol. 9:2665-2678) — the objective NUPACK's ``tube_design``
+        minimizes.
+
+        Unlike the per-complex :meth:`defect`, this scores the *whole tube* at
+        equilibrium and decomposes into two parts:
+
+        - **structural defect** ``Σ_h c_h · ñ(h, s_h)`` — equilibrium
+          concentration of each on-target complex ``h`` times its *unnormalized*
+          complex ensemble defect (number of incorrectly paired nucleotides
+          relative to target structure ``s_h``);
+        - **concentration defect** ``Σ_h |h| · max(0, c_h* − c_h)`` — on-target
+          material that failed to form at its target concentration ``c_h*``,
+          because the strands were sequestered in off-target complexes.  This is
+          how off-targets are penalized: they are *every* complex in the tube
+          that is not an on-target, and the equilibrium solve has already
+          distributed the strands among them, so no explicit off-target list or
+          ΔΔG threshold is needed.
+
+        The sum is normalized by the total on-target nucleotide concentration
+        ``Σ_h |h| · c_h*`` so the result lies in ``[0, ~1]`` and is comparable
+        across tubes (set ``normalize=False`` for the raw nucleotide count).
+
+        Parameters
+        ----------
+        on_targets : list of ``(complex_canonical_name, target_dot_bracket,
+                     target_concentration_M)``.
+        """
+        if self._engine is None:
+            raise RuntimeError(
+                "TubeResult missing engine; cannot compute tube ensemble defect"
+            )
+        n_struct = 0.0
+        n_conc = 0.0
+        nt_total = 0.0
+        for cx_name, target, c_target in on_targets:
+            cx = self.complexes.get(cx_name)
+            if cx is None:
+                raise KeyError(
+                    f"on-target complex {cx_name!r} is not in this tube "
+                    f"(have {sorted(self.complexes)})"
+                )
+            size = cx.total_length
+            nt_total += size * max(c_target, 0.0)
+            c_eq = self.concentrations.get(cx_name, 0.0)
+            if c_eq > 0.0:
+                # unnormalized complex defect = incorrectly paired nucleotides
+                n_struct += c_eq * self._engine.ensemble_defect(
+                    cx.sequences, target, normalize=False
+                )
+            n_conc += size * max(0.0, c_target - c_eq)
+        defect = n_struct + n_conc
+        if not normalize:
+            return defect
+        return defect / nt_total if nt_total > 0.0 else 0.0
+
     def __repr__(self) -> str:
         return (
             f"TubeResult(tube={self.tube_name!r}, "

@@ -297,6 +297,65 @@ class TestTubeResultLazyAccess:
             bare.defect("A", "....")
 
 
+# ─── test-tube ensemble defect (multistate design objective) ─────────────────
+
+class TestTubeEnsembleDefect:
+    def _duplex_tube(self, a_seq, b_seq):
+        A = Strand("A", a_seq, material="dna")
+        B = Strand("B", b_seq, material="dna")
+        return Tube(
+            strand_totals={A: 1e-6, B: 1e-6},
+            complexes=ComplexSet([A, B], SetSpec(max_size=2)),
+            name="duplex",
+        )
+
+    def test_bounds_and_normalization(self):
+        engine = ThermoEngine(material="dna", celsius=37.0, sodium=1.0)
+        # Reverse-complement strands form the A_B duplex.
+        res = self._duplex_tube("ACGTACGTAC", "GTACGTACGT").analyze(engine)
+        struct = "(((((((((())))))))))"
+        d = res.tube_ensemble_defect([("A_B", struct, 1e-6)])
+        assert 0.0 <= d <= 1.0 + 1e-9
+        # raw (unnormalized) defect = d * total on-target nucleotide concentration
+        raw = res.tube_ensemble_defect([("A_B", struct, 1e-6)], normalize=False)
+        assert raw == pytest.approx(d * (20 * 1e-6), rel=1e-9)
+
+    def test_nonbinders_max_out_concentration_defect(self):
+        # Two strands that cannot pair leave A_B unformed: the concentration
+        # defect dominates and the normalized tube defect approaches 1.
+        engine = ThermoEngine(material="dna", celsius=37.0, sodium=1.0)
+        res = self._duplex_tube("AAAAAAAAAA", "AAAAAAAAAA").analyze(engine)
+        struct = "(((((((((())))))))))"
+        d = res.tube_ensemble_defect([("A_B", struct, 1e-6)])
+        assert d == pytest.approx(1.0, abs=1e-6)
+
+    def test_good_binders_beat_nonbinders(self):
+        engine = ThermoEngine(material="dna", celsius=37.0, sodium=1.0)
+        struct = "(((((((((())))))))))"
+        good = self._duplex_tube("ACGTACGTAC", "GTACGTACGT").analyze(engine)
+        bad = self._duplex_tube("AAAAAAAAAA", "AAAAAAAAAA").analyze(engine)
+        assert (good.tube_ensemble_defect([("A_B", struct, 1e-6)])
+                < bad.tube_ensemble_defect([("A_B", struct, 1e-6)]))
+
+    def test_unknown_on_target_raises(self):
+        engine = ThermoEngine(material="dna", celsius=37.0)
+        res = self._duplex_tube("ACGTACGTAC", "GTACGTACGT").analyze(engine)
+        with pytest.raises(KeyError, match="not in this tube"):
+            res.tube_ensemble_defect([("NOPE", "...", 1e-6)])
+
+    def test_requires_engine(self):
+        bare = TubeResult(
+            tube_name="t",
+            concentrations={"A": 1e-6},
+            free_energies={"A": 0.0},
+            strand_free={"A": 1e-6},
+            complexes={"A": Complex(strands=(Strand("A", "ACGT"),))},
+            converged=True,
+        )
+        with pytest.raises(RuntimeError, match="engine"):
+            bare.tube_ensemble_defect([("A", "....", 1e-6)])
+
+
 # ─── tube_analysis driver ────────────────────────────────────────────────────
 
 class TestTubeAnalysisDriver:

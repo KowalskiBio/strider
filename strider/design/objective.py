@@ -353,6 +353,71 @@ class DesignObjective:
         return obj
 
     @classmethod
+    def multitube_defect(
+        cls,
+        engine: "ThermoEngine",
+        tubes: "list[tuple[Callable, list[tuple[str, str, float]]]]",
+        tube_weights: "list[float] | None" = None,
+        weight: float = 1.0,
+        normalize: bool = True,
+        label: str | None = None,
+    ) -> "DesignObjective":
+        """
+        **Multistate / multi-tube** ensemble-defect objective — the design
+        capability NUPACK exposes as ``tube_design`` (one tube) and multistate
+        test-tube design (several tubes); Wolfe, Mirin & Pierce 2017
+        (J. Mol. Biol. 429:220-228) and Fornace et al. 2020.
+
+        Each tube is specified as ``(tube_factory, on_targets)`` where
+
+        - ``tube_factory`` is a callable ``(sequences) -> Tube`` that rebuilds a
+          fresh :class:`~strider.tube.Tube` from the current sequence assignment
+          (so :class:`~strider.tube.Strand` objects pick up the latest sequences
+          each evaluation), and
+        - ``on_targets`` is a list of ``(complex_canonical_name,
+          target_dot_bracket, target_concentration_M)``.
+
+        For every tube the optimiser runs an equilibrium solve and computes the
+        normalized :meth:`~strider.tube.TubeResult.tube_ensemble_defect`
+        (structural + concentration defect, so off-target formation is penalized
+        through the lost on-target material).  The objective is the weighted sum
+        of the per-tube defects::
+
+            score = Σ_t  tube_weights[t] · C_tube(t)
+
+        A single-element ``tubes`` list reproduces NUPACK ``tube_design``; the
+        existing :meth:`ensemble_defect` (no concentrations) reproduces
+        ``complex_design``.
+
+        ``tube_weights`` defaults to all-ones.  A tube whose equilibrium solve
+        raises contributes ``+inf`` (an invalid sequence is rejected by the SA
+        move), matching the other equilibrium objectives.
+        """
+        if tube_weights is None:
+            tube_weights = [1.0] * len(tubes)
+        if len(tube_weights) != len(tubes):
+            raise ValueError("tube_weights length must match number of tubes")
+        lbl = label or f"multitube_defect({len(tubes)} tube{'s' if len(tubes) != 1 else ''})"
+
+        def fn(seqs: dict[str, str]) -> float:
+            total = 0.0
+            for (tube_factory, on_targets), tw in zip(tubes, tube_weights):
+                try:
+                    tube = tube_factory(seqs)
+                    result = tube.analyze(engine)
+                    total += tw * result.tube_ensemble_defect(
+                        on_targets, normalize=normalize
+                    )
+                except Exception:
+                    return float("inf")
+            return total
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [lbl]
+        return obj
+
+    @classmethod
     def from_callable(
         cls,
         fn: Callable[[dict[str, str]], float],
