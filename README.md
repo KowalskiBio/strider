@@ -1,6 +1,6 @@
 # strider-dna — Nucleic Acid Thermodynamics, Kinetics, and Circuit Design
 
-[![Tests](https://img.shields.io/badge/tests-420%20passed-brightgreen)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-436%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
@@ -38,6 +38,7 @@ Beyond thermodynamics, strider provides a **`Tube` / `ComplexSet` API** for mult
    - [Export formats](#17-export-formats)
    - [Surface transducer, LOD, and surface ΔG](#18-surface-transducer-lod-and-surface-δg)
    - [G-quadruplex / aptamer folding](#19-g-quadruplex--aptamer-folding)
+   - [Low-copy stochastic capture — shot-noise-limited LOD](#20-low-copy-stochastic-capture--shot-noise-limited-lod)
 6. [API reference](#api-reference)
 7. [Examples](#examples)
 8. [Backend comparison](#backend-comparison)
@@ -1466,6 +1467,28 @@ e.p_g4, e.p_secondary                       # population in G4 vs WC structures,
 
 The G4 is folded into the partition function as `Z_total = Z_secondary + Σ_g exp(−ΔG_g/RT)·Z_flank(g)`, where `Z_flank(g)` is computed by forcing the tetrad guanines unpaired via the existing `blocked` constraint — so the duplex-vs-G4 competition is exact *within the model* and needs no edit to the core DP. The two-state ΔH/ΔS model has a tract-association nucleation term, a per-tetrad-stack term (more tetrads ⇒ more stable), a loop-length entropic penalty (Guédin, Gros & Mergny 2010), and a Langmuir cation term sized so a G4 is essentially unfolded without stabilizing cation and K⁺ ≫ Na⁺. Reference parameters are fit to canonical melts (c-myc Pu22, telomere 22AG, thrombin-binding aptamer; see `scratch/fit_g4_params.py`). The absolute numbers carry the field's real construct-to-construct spread, but the trends — 3-tetrad > 2-tetrad, short loops > long loops, K⁺ > Na⁺, [cation]↑ ⇒ stabilize — are guaranteed correct. Pairs naturally with §18: a K⁺-gated G4 aptamer's folded fraction drives the surface read-out (see `examples/11_quadruplex_aptamer.py`).
 
+### 20. Low-copy stochastic capture — shot-noise-limited LOD
+
+The deterministic `SurfaceModel` (§18) integrates a diffusion-limited flux against a bulk concentration that **never depletes** — fine at high analyte, a fantasy at the fM–aM concentrations where a limit of detection actually lives, where the sample aliquot holds only ~10¹–10⁴ molecules. There, capture is a **counting process** and its Poisson shot noise — not the amplifier — sets the LOD. `StochasticSurfaceModel` adds that physics.
+
+```python
+from strider.surface import StochasticSurfaceModel, SurfaceParams
+
+sto = StochasticSurfaceModel(SurfaceParams())
+lv = sto.levels()                  # Currie thresholds, in captured-molecule counts
+lv.critical_level, lv.detection_limit   # L_C = k·σ₀,  L_D = 2·L_C + k² = 3.29·σ₀ + 2.71
+
+make = lambda c: (times, np.full_like(times, c))     # a C(t) trace per trigger
+sto.shot_noise_lod(make, triggers)   # lowest trigger reaching L_D (counting-limited)
+sto.detection_probability(*make(1e-16))              # power curve incl. shot noise
+
+# drive the capture as a mantis Gillespie SSA (single-molecule resolution)
+samp = sto.simulate_capture(*make(5e-17), n_trajectories=200)
+samp.empirical_mean, samp.empirical_var              # ≈ μ, μ  (Poisson)
+```
+
+The captured mean is capped at the molecule budget (`μ = N_total·(1 − exp(−N_unsat/N_total))`) and the realized count is Poisson(μ). The **Currie (1968)** detection framework gives `L_D = 3.29·σ₀ + 2.71` counts with `σ₀ = √(μ_b + σ_read²)` (blank + read-out noise as equivalent label events); the irreducible `+k²` term is the textbook **≈2.71-captured-molecule zero-background floor** — no electronics can beat it. The resulting `shot_noise_lod` is ~10³× higher (and more honest) than the deterministic `SurfaceModel.lod`, which on the reference biosensor "detects" 3 molecules. `simulate_capture` builds a one-reaction capture CRN and runs the mantis SSA to reproduce the Poisson statistics end to end. See `examples/12_shot_noise_lod.py`. (Residual: a full reaction-diffusion PDE — spatial gradients near the electrode — is out of scope; this is the well-mixed shot-noise budget.)
+
 ---
 
 ## API reference
@@ -1558,6 +1581,9 @@ Shared methods:
 | `ReadoutChain(...)` | TIA gain + ADC + averaging → `current_floor_A()`, `charge_floor_C()` |
 | `SurfaceCorrection(...)` | callable `(seq)->float` salt offset for `ThermoEngine(correction_model=…)`; `.tether_offset()` complex-level penalty |
 | `tether_dg`, `double_layer_local_salt`, `debye_length_m` | standalone surface-ΔG primitives |
+| `StochasticSurfaceModel(params, blank_mean_counts=0, k=1.645)` | `.levels()` (Currie `L_C`/`L_D`), `.capture_mean`, `.detection_probability`, `.shot_noise_lod(make_trace, triggers)`, `.simulate_capture(...)` (mantis SSA) |
+| `currie_levels(blank_mean, sigma_read, k)` / `detection_probability(mean_signal, levels)` | Currie (1968) counting thresholds and detection power curve |
+| `readout_sigma_counts(params)` | read-out floor in equivalent captured-label counts |
 
 ### G-quadruplex (`strider.structure.quadruplex`)
 
@@ -1879,6 +1905,10 @@ Reads strand topology in domain space and *derives* the reachable complexes plus
 
 Chains `fold_quadruplex` / `quadruplex_ensemble` (the §19 G4 layer) into the §18 surface transducer: the K⁺-dependent folded fraction of a telomeric G4 aptamer sets how many tethered redox reporters are in the signal-ON conformation, producing a [K⁺] calibration curve in nA. The whole transduction mechanism — G4 folding — is one NUPACK structurally cannot represent.
 
+### `12_shot_noise_lod.py` — Shot-noise-limited detection
+
+Contrasts the deterministic surface LOD with the §20 stochastic one. The deterministic transducer's infinite-reservoir assumption "captures" thousands of molecules at concentrations where only a handful exist, giving an LOD ~10³× too optimistic; the `StochasticSurfaceModel` caps capture at the molecule budget, applies the Currie counting-statistics detection limit, and drives the capture as a mantis Gillespie SSA — exposing the Poisson shot-noise floor that actually limits the assay.
+
 ---
 
 ## Backend comparison
@@ -1919,7 +1949,7 @@ pip install -e .[dev]
 pytest tests/ -v
 ```
 
-The test suite has **420 tests, all green** (1 skipped — a torch/mantis-integration test when the optional dep is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
+The test suite has **436 tests, all green** (1 skipped — a torch/mantis-integration test when the optional dep is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
 
 | File | Tests | What is covered |
 |---|---|---|
@@ -1944,6 +1974,7 @@ The test suite has **420 tests, all green** (1 skipped — a torch/mantis-integr
 | `test_cli.py` | 14 | `strider fold/pfunc/duplex/melt/cotx`, JSON output, stdin / @file sequence input |
 | `test_differentiable.py` | 4 | `ThermoParameters` init, batched forward, backward-gradient propagation, toy training step |
 | `test_quadruplex.py` | 22 | PQS motif recognition, two-state G4 ΔH/ΔS/Tm, stability/loop/tetrad ordering, K⁺>Na⁺ cation dependence, folded fraction, duplex-vs-G4 partition competition |
+| `test_stochastic_surface.py` | 16 | Currie L_C/L_D counting thresholds, k² zero-background floor, detection-probability power curve, depletion-corrected capture mean, shot-noise LOD vs deterministic, mantis SSA matches Poisson |
 
 > **Note:** tests requiring `mantis-delta` are skipped if it is not installed (install via `pip install -e ../mantis` for editable mode).
 
