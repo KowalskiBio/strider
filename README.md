@@ -36,6 +36,7 @@ Beyond thermodynamics, strider provides a **`Tube` / `ComplexSet` API** for mult
    - [Parameter sets and custom NN tables](#15-parameter-sets-and-custom-nn-tables)
    - [Differentiable thermodynamics (PyTorch)](#16-differentiable-thermodynamics-pytorch)
    - [Export formats](#17-export-formats)
+   - [Surface transducer, LOD, and surface ΔG](#18-surface-transducer-lod-and-surface-δg)
 6. [API reference](#api-reference)
 7. [Examples](#examples)
 8. [Backend comparison](#backend-comparison)
@@ -221,16 +222,17 @@ All commands accept `--celsius`, `--material {dna,rna}`, `--sodium`, `--magnesiu
 ```python
 from strider import ThermoEngine
 
-# Auto-select: prefers vienna > native
+# Default is the native engine — strider's own, dependency-free, authoritative.
+# 'auto' resolves to 'native' (it is never silently replaced by an external lib).
 engine = ThermoEngine(material='dna', celsius=37, sodium=0.137, magnesium=0.01)
 
 # Explicit backend
-engine_v = ThermoEngine(backend='vienna')    # requires ViennaRNA (optional)
-engine_0 = ThermoEngine(backend='native')    # always available, MIT-licensed
+engine_0 = ThermoEngine(backend='native')    # default; always available, MIT-licensed
+engine_v = ThermoEngine(backend='vienna')    # OPTIONAL cross-check only; must be requested
 
 # Check what's available
 print(ThermoEngine.available_backends())    # e.g. ['native'] or ['native', 'vienna']
-print(engine.backend_name)                  # 'vienna' or 'native' depending on env
+print(engine.backend_name)                  # 'native' (unless you asked for 'vienna')
 
 # Optional: load a specific nearest-neighbor parameter set
 engine_p = ThermoEngine(material='dna', parameter_set='native-dna')
@@ -945,6 +947,38 @@ cha = CHA(
 )
 ```
 
+#### CHA as a *generator* — `from_target` and `design`
+
+The constructor above *checks* sequences you already have. `CHA` can also **build** them from a target. `from_target` lays out the domains (the target's 3′ end is the initiation toehold D1, the adjacent block the branch-migration stem D2, plus a hairpin loop and an optional orthogonal capture handle K → CP = K\*) and assembles ready-to-`verify()` strands:
+
+```python
+cha = CHA.from_target(
+    'UAGCUUAUCAGACUGAUGUUGA',          # target (RNA or DNA)
+    d1_len=7, d2_len=13,
+    loop='ACTTAATTAAGT',
+    capture='ACGATCAGTCATGCAACGTA',     # K (CP = reverse complement)
+)
+report = cha.verify()                    # round-trips with the checker
+```
+
+`design` goes further: it **searches** for the split, loop, and capture handle. It scans `d1_grid × d2_grid × loops`, ranks each combo by a cascade-gate penalty (R1/R2 driving force, toehold accessibility, hairpin-stability sweet-spot), then for the top `rerank_top_n` combos designs an orthogonal handle K with `SequenceDesigner` and **re-ranks on the post-capture gate** — the R2 measured *with K attached to H1*, which is what validation actually gates on, not the bare-hairpin proxy:
+
+```python
+cha = CHA.design(
+    'UAGCUUAUCAGACUGAUGUUGA',
+    d1_grid=(6, 7, 8), d2_grid=(11, 13, 15),
+    capture_len=20, rerank_top_n=3,
+    n_trials=3, max_iterations=120,
+)
+print(cha.design_info['context'])        # chosen (d1, d2, loop)
+rn = cha.to_crnetwork()                   # straight into mantis
+```
+
+Two reusable pieces underpin `design`, both usable on their own for any circuit:
+
+- **`DesignObjective.reaction_driving_force(engine, reactants, products, max_ddg, assemble_fn=…)`** — a *coupling constraint*: penalize a reaction whose driving force drifts above a gate while the optimizer tunes a *different* domain. `assemble_fn` builds the full strands so the gate is measured on the assembled context (e.g. the handle attached to H1), not the bare domain. This is the design-time mirror of the `reaction_driving_force` *check*.
+- **`design_with_rerank(designer, contexts, build_problem, score_fn, top_n=3)`** — design the top-N pre-ranked contexts and pick the winner by a downstream `score_fn` evaluated on the *finished* design (the gate-with-downstream value), rather than trusting the pre-rank proxy.
+
 #### HCR — Hybridization Chain Reaction
 
 ```python
@@ -1325,6 +1359,60 @@ write(seq, struct, path='output.ct',  fmt='ct', energy=-2.8)
 
 ---
 
+### 18. Surface transducer, LOD, and surface ΔG
+
+NUPACK assumes a well-mixed 3-D bulk and stops at static equilibrium. But almost every clinical readout — electrochemical, SPR, gold-nanoparticle — happens at a **tethered surface**, where capture is diffusion-limited, the probe layer has finite capacity, and the local salt/entropy environment warps hybridization. `strider.surface` adds that layer. It turns a solution-phase concentration trace `C(t)` (typically a mantis `SimulationResult` species) into a predicted signal and a **limit of detection**.
+
+```python
+from strider import SurfaceModel, SurfaceParams, PrussianBlueLabel, ReadoutChain
+import numpy as np
+
+params = SurfaceParams(
+    d_species_m2_s=1e-10,        # analyte diffusion coefficient
+    electrode_radius_m=1.5e-3,   # 3 mm⌀ working electrode
+    incubation_s=90 * 60,
+    sample_volume_L=50e-6,
+    probe_density_per_m2=1e16,   # capture sites → finite capacity (ULOQ)
+    label=PrussianBlueLabel(diameter_nm=40.0),   # charge per captured event
+    readout=ReadoutChain(),      # LMP91000 TIA + ESP32-S3 ADC → noise floor
+)
+model = SurfaceModel(params)
+
+times = np.linspace(0, 90 * 60, 400)
+dimer_M = ...                    # e.g. sim.concentrations['H1_H2']
+res = model.transduce(times, dimer_M)
+print(res.capture_fraction, res.peak_current_A, res.detectable)
+
+# straight from a mantis result:
+res = model.transduce_result(sim, species='H1_H2')
+```
+
+**Capture** uses the Shoup–Szabo absorbing-disk flux (spans the Cottrell transient → steady state) with a finite-capacity cap `N = N_max·(1 − e^(−N_unsat/N_max))` that sets the upper limit of the working range. **Read-out** maps each captured event onto a charge via a pluggable `LabelModel`; the bundled `PrussianBlueLabel` models a redox nanoparticle whose addressable fraction is set by counterion (K⁺) shell-penetration per DPV pulse. Any reporter chemistry plugs in by implementing `signal_per_event()`.
+
+**LOD** is the lowest trigger whose signal clears the read-out floor:
+
+```python
+ref = dimer_M                                  # reference trace at one trigger
+make_trace = lambda c: (times, ref * (c / 1e-15))   # linear-cascade scaling
+lod = model.lod(make_trace, triggers=np.logspace(-18, -12, 31))
+```
+
+**Surface ΔG corrections** capture the thermodynamic warping a tether imposes, reusing `strider.thermo.salt`:
+
+```python
+from strider import SurfaceCorrection, ThermoEngine
+
+sc = SurfaceCorrection(bulk_na_M=0.137, probe_density_per_m2=1e16,
+                       spacer='c6', n_segments=6)
+# per-strand salt offset (Gouy–Chapman local salt) plugs into the engine hook:
+engine = ThermoEngine(material='dna', correction_model=sc)
+sc.tether_offset()       # complex-level configurational-entropy penalty (kcal/mol)
+```
+
+A dense, charged probe monolayer accumulates counterions (`double_layer_local_salt` → Gouy–Chapman ψ₀ → Boltzmann-enhanced local [Na⁺]), which stabilizes duplexes; pinning one strand-end costs configurational entropy (`tether_dg`, a spacer table + optional ideal-chain term), which destabilizes. The salt part is genuinely per-strand and rides the existing `ThermoEngine(correction_model=…)` hook; the tether part is complex-level and added explicitly to a capture ΔΔG.
+
+---
+
 ## API reference
 
 ### `ThermoEngine`
@@ -1402,6 +1490,26 @@ Shared methods:
 | `simulate(ic, t_span, **kw)` | `SimulationResult` | Deterministic ODE |
 | `steady_states(ic, **kw)` | `list[SteadyState]` | mantis steady-state finder |
 | `verify(registry=None)` | `CircuitReport` | Run default (or user) check suite |
+
+`CHA` additionally provides two classmethods that *generate* sequences from a target: `CHA.from_target(target, *, d1_len, d2_len, loop, capture='')` and `CHA.design(target, *, d1_grid, d2_grid, capture_len, rerank_top_n=3, n_trials, max_iterations, …)`.
+
+### Surface transducer (`strider.surface`)
+
+| Class / function | Description |
+|---|---|
+| `SurfaceModel(params)` | `.transduce(times, C_M)`, `.transduce_result(sim, species)`, `.lod(make_trace, triggers)`, `.max_capture_sites()` |
+| `SurfaceParams(...)` | geometry, incubation, `probe_density_per_m2`, `label`, `readout` |
+| `LabelModel` / `PrussianBlueLabel` | reporter → charge per captured event (`signal_per_event()`); subclass `LabelModel` for other chemistries |
+| `ReadoutChain(...)` | TIA gain + ADC + averaging → `current_floor_A()`, `charge_floor_C()` |
+| `SurfaceCorrection(...)` | callable `(seq)->float` salt offset for `ThermoEngine(correction_model=…)`; `.tether_offset()` complex-level penalty |
+| `tether_dg`, `double_layer_local_salt`, `debye_length_m` | standalone surface-ΔG primitives |
+
+### Design helpers
+
+| Function | Description |
+|---|---|
+| `DesignObjective.reaction_driving_force(engine, reactants, products, max_ddg, assemble_fn=None, weight=1.0)` | one-sided coupling-constraint penalty on an assembled reaction's driving force |
+| `design_with_rerank(designer, contexts, build_problem, score_fn, top_n=3, **design_kw)` | design top-N pre-ranked contexts, pick by downstream `score_fn` → `RerankResult` |
 
 ### `CircuitBridge` and `CHABridge`
 
@@ -1715,7 +1823,7 @@ The `native` backend uses strider's own Zuker MFE and McCaskill O(n³) partition
 
 Reproduce with `python scripts/bench_mfe.py`.
 
-**Accuracy.** Stack energies match the source papers exactly (SantaLucia 2004 AA/TT = −1.00 kcal/mol, CG/CG = −2.17, GC/GC = −2.24; Mathews 1999 AU/UA = −0.93). Multi-strand pair probabilities currently have a known limitation (some entries can exceed 1.0) because the multi-strand external-loop outside recurrence is incomplete — equilibrium concentrations are unaffected (they only use ΔG), but pair-probability matrices for ≥2-strand complexes are diagnostic-quality, not publication-quality.
+**Accuracy.** Stack energies match the source papers exactly (SantaLucia 2004 AA/TT = −1.00 kcal/mol, CG/CG = −2.17, GC/GC = −2.24; Mathews 1999 AU/UA = −0.93). The McCaskill outside recurrence is the exact adjoint of the inside DP: single-strand pair probabilities satisfy the unpaired-marginal identity to numerical precision (incl. multiloop-enclosed pairs, which the partition function now scores with a correct ≥2-branch multiloop closure — no stacked-helix double-count and with leading-unpaired bases). Multi-strand matrices are consistent everywhere except the immediate nick-junction pair (a small coaxial-junction residual).
 
 **Optional Vienna backend.** If `ViennaRNA` is installed and you set `backend='vienna'`, strider routes MFE / pfunc to RNA.fold / RNA.pf_fold. Use it for production-quality folding of sequences > ~200 nt where native runtime becomes the bottleneck. The Tube/ComplexSet API, leakage enumeration, kinetics, and design pipelines work identically on top of either backend.
 
@@ -1725,9 +1833,9 @@ Reproduce with `python scripts/bench_mfe.py`.
 |---|---|
 | Rapid screening / design iteration (< 100 nt) | `native` |
 | Concentration solver / equilibrium analysis | `native` |
-| MFE folding of sequences > 200 nt | `vienna` |
-| No external dependencies (CI, lightweight environments) | `native` |
-| Multi-strand pair probabilities at publication accuracy | `vienna` (until native outside recurrence is finished) |
+| MFE folding of sequences > 200 nt | `vienna` (optional, opt-in) |
+| No external dependencies (CI, lightweight environments) | `native` (default) |
+| Single-strand / multiloop pair probabilities (exact) | `native` |
 
 ---
 
@@ -1781,9 +1889,9 @@ pip install -e .
 
 Running `pip install -e .` from a parent directory will not work.
 
-### Multi-strand pair probabilities exceed 1.0
+### Multi-strand pair probabilities near a nick
 
-The native McCaskill outside recurrence does not yet implement the full multi-strand external-loop contribution, so `TubeResult.pair_probabilities("A_B")` for a multi-strand complex can show entries slightly above 1.0. Equilibrium concentrations (`TubeResult.concentrations`) and free energies (`.free_energies`) are unaffected — they only consume ΔG, not the matrix. For multi-strand pair-probability matrices at publication accuracy, set `backend='vienna'` on the engine.
+The native McCaskill outside recurrence is now the exact adjoint of the inside recurrence: **single-strand** pair probabilities (and `TubeResult.defect`) satisfy the unpaired-marginal identity `Σ_j P(i,j) = 1 − P_unpaired(i)` to numerical precision, including pairs inside multiloops (previously underestimated). For **multi-strand** complexes one narrow case remains approximate — the immediate nick-junction pair `(i, i+1)` straddling a strand boundary (the coaxial closing pair) is slightly over-counted; every other position is consistent and no entry grossly exceeds 1.0. Equilibrium concentrations and free energies are unaffected (they consume ΔG only).
 
 ### `CHA().verify()` fails spontaneous leakage check
 

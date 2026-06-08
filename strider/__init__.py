@@ -72,8 +72,15 @@ from strider.design.policies import (
 from strider.design.decomposition import (
     build_strand_graph, connected_components, decompose_assays,
 )
+from strider.design.rerank import design_with_rerank, RerankResult
 
 from strider.screen.offtarget import OffTargetScreener, ScreeningReport
+
+from strider.surface import (
+    SurfaceModel, SurfaceParams, TransduceResult,
+    LabelModel, PrussianBlueLabel, ReadoutChain,
+    SurfaceCorrection, tether_dg, double_layer_local_salt, debye_length_m,
+)
 
 from strider.bridge.mantis_bridge import (
     CHABridge, CHAVerificationReport, CircuitBridge, rates_to_crnetwork,
@@ -130,8 +137,13 @@ __all__ = [
     "MutationPolicy", "RandomMutationPolicy", "DefectWeightedPolicy",
     "ConstraintAwarePolicy", "per_residue_defect_from_ensemble",
     "build_strand_graph", "connected_components", "decompose_assays",
+    "design_with_rerank", "RerankResult",
     # Screening
     "OffTargetScreener", "ScreeningReport",
+    # Surface-tethered biophysics (transducer / LOD / surface ΔG)
+    "SurfaceModel", "SurfaceParams", "TransduceResult",
+    "LabelModel", "PrussianBlueLabel", "ReadoutChain",
+    "SurfaceCorrection", "tether_dg", "double_layer_local_salt", "debye_length_m",
     # Bridge to mantis
     "CHABridge", "CHAVerificationReport", "CircuitBridge", "rates_to_crnetwork",
     # Sweep & cache

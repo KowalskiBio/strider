@@ -217,6 +217,48 @@ class TestCHA:
         )
         assert result.success
 
+    # ─── generator: target → CHA ──────────────────────────────────────────────
+
+    def test_from_target_round_trips_with_checker(self):
+        # Building from a split, then verifying, runs the same machinery as a
+        # hand-built CHA with those exact strands.  Pin native for reproducibility.
+        engine = ThermoEngine(material="dna", celsius=37.0, sodium=0.137,
+                              magnesium=0.01, backend="native")
+        loop, cap = "ACTTAATTAAGT", "ACGATCAGTCATGCAACGTA"
+        cha = CHA.from_target(MIR21, d1_len=7, d2_len=13, loop=loop,
+                              capture=cap, engine=engine)
+        assert set(cha.sequences) == {"mirna", "H1", "H2", "CP"}
+        assert cha.toehold_d1 == 7 and cha.toehold_d2 == 13
+        assert cha.tail_cp == len(cap)
+        # D1 = 3' toehold of the target appears (as its complement) at H1's 5' end
+        from strider import reverse_complement
+        assert cha.sequences["H1"].startswith(reverse_complement(MIR21[-7:]))
+        # the assembled strands verify through the standard registry (same split)
+        hand = CHA(sequences=dict(cha.sequences), engine=engine,
+                   toehold_d1=7, toehold_d2=13, tail_cp=len(cap))
+        a = {r.name: r.value for r in cha.verify().results}
+        b = {r.name: r.value for r in hand.verify().results}
+        assert a.keys() == b.keys()
+        for k in a:
+            assert a[k] == pytest.approx(b[k], rel=1e-9)
+
+    def test_design_produces_verifiable_cha(self):
+        # Tiny budget: one split, short anneal — just exercise the full path.
+        engine = ThermoEngine(material="dna", celsius=37.0, sodium=0.137,
+                              magnesium=0.01, backend="native")
+        cha = CHA.design(MIR21, engine=engine, d1_grid=(7,), d2_grid=(13,),
+                         loops=["ACTTAATTAAGT"], capture_len=18,
+                         rerank_top_n=1, n_trials=1, max_iterations=8, seed=0)
+        assert set(cha.sequences) == {"mirna", "H1", "H2", "CP"}
+        assert len(cha.sequences["CP"]) == 18
+        assert "context" in cha.design_info
+        # the cascade gates the designer optimized should clear on the winner
+        results = {r.name: r for r in cha.verify().results}
+        assert results["R1_driving_force"].passed
+        assert results["R2_driving_force"].passed
+        # and it still emits a CRNetwork
+        assert cha.to_crnetwork() is not None
+
 
 # ─── Custom registry composition ─────────────────────────────────────────────
 

@@ -260,11 +260,11 @@ class TestTubeResultLazyAccess:
         assert P.shape == (n, n)
         # Symmetric to within numerical noise.
         assert np.allclose(P, P.T, atol=1e-6)
-        # No negative probabilities.  (The native McCaskill outside recurrence
-        # can slightly exceed 1.0 because multiloop outside terms are not
-        # fully wired — pre-existing limitation flagged in ensemble.py docstring.)
+        # No negative probabilities; the McCaskill outside recurrence is now the
+        # exact adjoint of the inside (multiloop terms + per-pair salt wired), so
+        # every probability is a valid marginal in [0, 1].
         assert P.min() >= -1e-9
-        assert P.max() <= 1.15
+        assert P.max() <= 1.0 + 1e-9
 
     def test_defect_matches_engine(self):
         A = Strand("A", "GCGCAAAAGCGC")

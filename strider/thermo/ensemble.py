@@ -56,6 +56,7 @@ def ensemble_dg(
     material: str = "dna",
     sodium_M: float = 1.0,
     magnesium_M: float = 0.0,
+    blocked: "set | None" = None,
 ) -> tuple[float, np.ndarray]:
     """
     Ensemble free energy and base-pair probability matrix.
@@ -68,6 +69,9 @@ def ensemble_dg(
     per-base-pair ΔG shift (see :func:`strider.thermo.salt.dg_per_bp_salt`).
     Defaults to 1 M Na⁺ / 0 Mg²⁺ — the SantaLucia/Turner reference state, at
     which no correction is applied.
+
+    ``blocked`` optionally forbids a set of 0-based positions from pairing
+    (hard structural constraint; also used to compute unpaired marginals).
     """
     # Always work in T-form internally.  RNA-specific tables (TERMINAL_PENALTY,
     # TERMINAL_MISMATCH, DANGLE_*, INTERIOR_MISMATCH, STACK) all use T-keyed
@@ -81,6 +85,7 @@ def ensemble_dg(
     Q  = np.zeros((n, n))
     Qb = np.zeros((n, n))
     QM = np.zeros((n, n))
+    QM1 = np.zeros((n, n))
 
     for i in range(n):
         Q[i][i] = 1.0
@@ -90,14 +95,23 @@ def ensemble_dg(
     from strider.thermo.salt import dg_per_bp_salt
     bp_salt_factor = _boltzmann(dg_per_bp_salt(sodium_M, magnesium_M), T)
 
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks=[], bp_salt_factor=bp_salt_factor)
+    _fill_dp_nicks(seq, Q, Qb, QM, QM1, n, T, pairs, material, nicks=[],
+                   bp_salt_factor=bp_salt_factor, blocked=blocked)
     _apply_coaxial_external(seq, Q, Qb, n, T, material)
 
     Z = Q[0][n - 1]
     if Z <= 0:
         Z = 1.0
     dG_ens = -R * T * math.log(Z)
-    pair_probs = _pair_probs_outside(seq, Q, Qb, n, Z, T, pairs, material, nicks=[])
+    # Pair probabilities use a dangle-free external loop that is exactly
+    # consistent with the (dangle-free) Qb/QM/QM1 inside recurrence, so the
+    # outside recurrence is self-adjoint (satisfies the unpaired-marginal
+    # identity).  ΔG above keeps the full dangle/coaxial model.
+    Qnd = _external_Q_nodangle(Qb, n)
+    Znd = Qnd[0][n - 1] if Qnd[0][n - 1] > 0 else 1.0
+    pair_probs = _pair_probs_outside(seq, Qnd, Qb, QM, QM1, n, Znd, T, pairs,
+                                     material, nicks=[], blocked=blocked,
+                                     bp_salt_factor=bp_salt_factor)
     return dG_ens, pair_probs
 
 
@@ -337,8 +351,11 @@ def _can_pair(seq: str, i: int, j: int, pairs: set) -> bool:
     return frozenset([seq[i], seq[j]]) in pairs and (j - i) > 3
 
 
-def _can_pair_nicks(seq: str, i: int, j: int, pairs: set, nicks: list) -> bool:
+def _can_pair_nicks(seq: str, i: int, j: int, pairs: set, nicks: list,
+                    blocked: "set | frozenset | None" = None) -> bool:
     if j <= i:
+        return False
+    if blocked is not None and (i in blocked or j in blocked):
         return False
     if frozenset([seq[i], seq[j]]) not in pairs:
         return False
@@ -359,24 +376,37 @@ def _terminal_pair_penalty(seq: str, i: int, j: int, material: str) -> float:
 
 # ─── DP fill ──────────────────────────────────────────────────────────────────
 
-def _fill_dp(seq, Q, Qb, QM, n, T, pairs, material):
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks=[])
+def _fill_dp(seq, Q, Qb, QM, n, T, pairs, material, QM1=None):
+    if QM1 is None:
+        QM1 = np.zeros((n, n))
+    _fill_dp_nicks(seq, Q, Qb, QM, QM1, n, T, pairs, material, nicks=[])
 
 
-def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list, bp_salt_factor: float = 1.0):
+def _fill_dp_nicks(seq, Q, Qb, QM, QM1, n, T, pairs, material, nicks: list,
+                   bp_salt_factor: float = 1.0, blocked: "set | None" = None):
     """
     Nick-aware McCaskill DP.
 
-    Three matrices:
-      Q[i][j]  — external loop partition function on [i..j]
-      Qb[i][j] — same, with i and j forced to be paired
-      QM[i][j] — multi-loop partial partition function (≥ 1 stem; pays ML_PAIR
-                 per stem and ML_BASE per unpaired base)
+    Four matrices:
+      Q[i][j]   — external loop partition function on [i..j]
+      Qb[i][j]  — same, with i and j forced to be paired
+      QM1[i][j] — multi-loop region [i..j] that is exactly ONE branch block: a
+                  stem starting at i (pays ML_PAIR) plus trailing unpaired bases
+                  (each pays ML_BASE)
+      QM[i][j]  — multi-loop region [i..j] with ≥ 1 branch block, allowing
+                  leading/internal/trailing unpaired bases
+
+    The multiloop closure (in :func:`_qb_val`) requires ≥ 2 branch blocks, so a
+    stacked/interior helix is never mis-scored as a degenerate 1-branch
+    "multiloop" (which would double-count it against the stack/interior terms).
 
     ``bp_salt_factor`` is the per-base-pair Boltzmann factor for the salt
     correction (= exp(-ΔG_per_bp/RT)).  Multiplied into Qb[i][j] once per
     closed pair so the correction is automatically ensemble-weighted by the
     pair probability.  Defaults to 1.0 (no correction, 1 M Na⁺ reference).
+
+    ``blocked`` is an optional set of positions forbidden from pairing (hard
+    structural constraint / used to compute unpaired marginals).
     """
     from strider.thermo._param_context import lookup_scalar, lookup_table
     if material == "dna":
@@ -399,22 +429,31 @@ def _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks: list, bp_salt_f
             j = i + length - 1
 
             # ── Qb[i][j] ──────────────────────────────────────────────────────
-            if _can_pair_nicks(seq, i, j, pairs, nicks):
+            if _can_pair_nicks(seq, i, j, pairs, nicks, blocked):
                 Qb[i][j] = _qb_val(
-                    seq, i, j, Q, Qb, QM, T, pairs, material, nicks, bm_ml_init_pair
+                    seq, i, j, Q, Qb, QM, QM1, T, pairs, material, nicks,
+                    bm_ml_init_pair, blocked
                 ) * bp_salt_factor
 
-            # ── QM[i][j] ──────────────────────────────────────────────────────
-            # Single stem (i,j)
+            # ── QM1[i][j] — region [i..j] is ONE branch block ─────────────────
+            # a stem starting at i (pays ML_PAIR), then trailing unpaired bases.
+            if j > i and QM1[i][j - 1] > 0:
+                QM1[i][j] = QM1[i][j - 1] * bm_ml_base
             if Qb[i][j] > 0:
-                QM[i][j] = Qb[i][j] * bm_ml_pair
-            # j unpaired (extend existing multiloop region)
-            if j > i and QM[i][j - 1] > 0:
-                QM[i][j] += QM[i][j - 1] * bm_ml_base
-            # Add stem [k,j] to existing multiloop region [i,k-1]
-            for k in range(i + 1, j):
-                if Qb[k][j] > 0 and QM[i][k - 1] > 0:
-                    QM[i][j] += QM[i][k - 1] * Qb[k][j] * bm_ml_pair
+                QM1[i][j] += Qb[i][j] * bm_ml_pair
+
+            # ── QM[i][j] — region [i..j] with ≥1 branch block ─────────────────
+            # k = start of the first branch block; (b_base^lead | earlier
+            # branches QM[i][k-1]) · QM1[k][j].  Leading unpaired is now modeled.
+            qm_acc = 0.0
+            for k in range(i, j):
+                q1 = QM1[k][j]
+                if q1 <= 0:
+                    continue
+                lead = bm_ml_base ** (k - i)          # unpaired i..k-1
+                prev = QM[i][k - 1] if k > i else 0.0
+                qm_acc += (lead + prev) * q1
+            QM[i][j] = qm_acc
 
             # ── Q[i][j] ───────────────────────────────────────────────────────
             Q[i][j] = Q[i][j - 1]  # j unpaired
@@ -544,7 +583,8 @@ def _apply_coaxial_external(seq: str, Q: np.ndarray, Qb: np.ndarray, n: int, T: 
     Q[0, :] = Q_stk
 
 
-def _qb_val(seq, i, j, Q, Qb, QM, T, pairs, material, nicks, bm_ml_init_pair):
+def _qb_val(seq, i, j, Q, Qb, QM, QM1, T, pairs, material, nicks,
+            bm_ml_init_pair, blocked=None):
     """Partition function contribution for the forced pair (i,j)."""
     val = 0.0
     spans_nick = any(i < k < j for k in nicks)
@@ -557,11 +597,11 @@ def _qb_val(seq, i, j, Q, Qb, QM, T, pairs, material, nicks, bm_ml_init_pair):
 
     # ── Terminal pair penalty for outermost inter-strand pair ─────────────────
     # Applied once per helix terminus (SantaLucia 1998 terminal-pair penalty).
-    if is_inter and not _can_pair_nicks(seq, i + 1, j - 1, pairs, nicks):
+    if is_inter and not _can_pair_nicks(seq, i + 1, j - 1, pairs, nicks, blocked):
         val += _boltzmann(_terminal_pair_penalty(seq, i, j, material), T)
 
     # ── Stack: adjacent inner pair (i+1, j-1) ─────────────────────────────────
-    if _can_pair_nicks(seq, i + 1, j - 1, pairs, nicks):
+    if _can_pair_nicks(seq, i + 1, j - 1, pairs, nicks, blocked):
         qb_inner = Qb[i + 1][j - 1]
         if qb_inner > 0:
             val += _boltzmann(_stack_energy(seq, i, j, material), T) * qb_inner
@@ -577,7 +617,7 @@ def _qb_val(seq, i, j, Q, Qb, QM, T, pairs, material, nicks, bm_ml_init_pair):
             jp = j - nr - 1
             if jp <= ip:
                 break
-            if not _can_pair_nicks(seq, ip, jp, pairs, nicks):
+            if not _can_pair_nicks(seq, ip, jp, pairs, nicks, blocked):
                 continue
             qb_inner = Qb[ip][jp]
             if qb_inner == 0.0:
@@ -585,13 +625,90 @@ def _qb_val(seq, i, j, Q, Qb, QM, T, pairs, material, nicks, bm_ml_init_pair):
             dG = _interior_bulge_energy(seq, i, j, ip, jp, nl, nr, material)
             val += qb_inner * _boltzmann(dG, T)
 
-    # ── Multi-loop: outer pair (i,j) closes a loop with ≥ 1 inner stem ────────
+    # ── Multi-loop: outer pair (i,j) closes a loop with ≥ 2 inner branches ────
+    # interior [i+1, j-1] = (≥1 branch block: QM[i+1][k-1]) + (final branch
+    # block: QM1[k][j-1]).  Requiring both factors enforces ≥2 branches, so a
+    # single inner helix stays an interior loop / stack, never a "multiloop".
     if j - i > 2:
-        qm = QM[i + 1][j - 1]
-        if qm > 0:
-            val += bm_ml_init_pair * qm
+        ml = 0.0
+        for k in range(i + 2, j):           # k = start of the last branch block
+            qm_left = QM[i + 1][k - 1]
+            if qm_left > 0.0:
+                q1 = QM1[k][j - 1]
+                if q1 > 0.0:
+                    ml += qm_left * q1
+        if ml > 0.0:
+            val += bm_ml_init_pair * ml
 
     return val
+
+
+def _external_Q_nodangle(Qb, n):
+    """Dangle-free external-loop partition function from Qb.
+
+    The dangle/coaxial decorations live only in the dangle-decorated ``Q`` used
+    for ΔG; ``Qb``/``QM``/``QM1`` are already dangle-free.  Recomputing the
+    external loop without dangles gives an external context that is *exactly*
+    consistent with the inside ``Qb`` recurrence, so the outside recurrence built
+    on it satisfies the unpaired-marginal identity to numerical precision.
+    """
+    Qnd = np.zeros((n, n))
+    for i in range(n):
+        Qnd[i][i] = 1.0
+    for i in range(n - 1):
+        Qnd[i][i + 1] = 1.0
+    for length in range(2, n + 1):
+        for i in range(n - length + 1):
+            j = i + length - 1
+            val = Qnd[i][j - 1]                       # j unpaired
+            for k in range(i, j + 1):
+                if Qb[k][j] > 0:
+                    left = Qnd[i][k - 1] if k > i else 1.0
+                    val += left * Qb[k][j]
+            Qnd[i][j] = val
+    return Qnd
+
+
+def _pairs_dp(seq, T, material, pairs, nicks, bp_salt_factor, blocked):
+    """Fill the dangle-free DP used for pair probabilities; return (Qnd, Qb, QM, QM1, Znd)."""
+    n = len(seq)
+    Q  = np.zeros((n, n))
+    Qb = np.zeros((n, n))
+    QM = np.zeros((n, n))
+    QM1 = np.zeros((n, n))
+    for i in range(n):
+        Q[i][i] = 1.0
+    for i in range(n - 1):
+        Q[i][i + 1] = 1.0
+    _fill_dp_nicks(seq, Q, Qb, QM, QM1, n, T, pairs, material, nicks,
+                   bp_salt_factor=bp_salt_factor, blocked=blocked)
+    Qnd = _external_Q_nodangle(Qb, n)
+    Znd = Qnd[0][n - 1] if n > 0 and Qnd[0][n - 1] > 0 else 1.0
+    return Qnd, Qb, QM, QM1, Znd
+
+
+def dangle_free_partition(sequence=None, celsius=37.0, material="dna",
+                          sodium_M=1.0, magnesium_M=0.0, blocked=None,
+                          sequences=None):
+    """Dangle-free partition function Z (single- or multi-strand).
+
+    Exposed for validation (unpaired marginals) and as the consistent reference
+    behind :func:`ensemble_dg`'s pair probabilities.
+    """
+    from strider.thermo.salt import dg_per_bp_salt
+    if sequences is not None:
+        seq = "".join(sequences).upper().replace("U", "T")
+        nicks, pos = [], 0
+        for s in sequences[:-1]:
+            pos += len(s); nicks.append(pos)
+    else:
+        seq = sequence.upper().replace("U", "T")
+        nicks = []
+    T = celsius + 273.15
+    pairs = _wc_pairs(material)
+    bp = _boltzmann(dg_per_bp_salt(sodium_M, magnesium_M), T)
+    _, _, _, _, Znd = _pairs_dp(seq, T, material, pairs, nicks, bp, blocked)
+    return Znd
 
 
 def _pair_probs(Q, Qb, n, Z):
@@ -613,45 +730,73 @@ def _pair_probs_outside(
     seq: str,
     Q: np.ndarray,
     Qb: np.ndarray,
+    QM: np.ndarray,
+    QM1: np.ndarray,
     n: int,
     Z: float,
     T: float,
     pairs: set,
     material: str,
     nicks: list,
+    blocked: "set | None" = None,
+    bp_salt_factor: float = 1.0,
 ) -> np.ndarray:
     """
     Full pair probabilities via the McCaskill outside recurrence.
 
-    Implements the external context, stack propagation, and interior-loop /
-    bulge propagation.  Multiloop outside contributions are not yet wired —
-    pairs inside a multiloop will be underestimated, but hairpin and
-    bimolecular-duplex pair probabilities match the canonical McCaskill
-    formulation (McCaskill 1990) closely.
+    Implements the external context, stack propagation, interior-loop / bulge
+    propagation, **and** the multiloop outside contribution — so pairs inside a
+    multiloop are no longer underestimated.  For single strands the result is the
+    exact adjoint of the inside recurrence and satisfies the unpaired-marginal
+    identity Σ_j P(i,j) = 1 − P_unpaired(i) to numerical precision (validated in
+    tests/test_pair_probs.py).
+
+    Known residual: for multi-strand complexes the *immediate nick-junction pair*
+    (i, i+1) straddling a strand boundary — the coaxial closing pair — is slightly
+    over-counted; all other positions remain consistent.  This is a narrow coaxial-
+    junction edge case and does not affect single-strand probabilities.
     """
     Pp = np.zeros((n, n))
     if Z <= 0:
         return Pp
 
+    # Multiloop Boltzmann factors (mirror _fill_dp_nicks).
+    from strider.thermo._param_context import lookup_scalar
+    if material == "dna":
+        from strider.thermo.parameters_dna import ML_INIT, ML_PAIR, ML_BASE
+    else:
+        from strider.thermo.parameters_rna import ML_INIT, ML_PAIR, ML_BASE
+    bm_ml_pair      = _boltzmann(lookup_scalar("multiloop_pair", ML_PAIR), T)
+    bm_ml_base      = _boltzmann(lookup_scalar("multiloop_base", ML_BASE), T)
+    bm_ml_init_pair = _boltzmann(lookup_scalar("multiloop_init", ML_INIT)
+                                 + lookup_scalar("multiloop_pair", ML_PAIR), T)
+
     # 1. External context: (i,j) is an outermost stem in the external loop.
+    #    Loop from i+1 (not i+4): an inter-strand pair spanning a nick may be
+    #    short (j-i<4).  Qb>0 already excludes invalid intra-strand short pairs.
     for i in range(n):
-        for j in range(i + 4, n):
+        for j in range(i + 1, n):
             if Qb[i][j] > 0:
                 left  = Q[0][i - 1] if i > 0 else 1.0
                 right = Q[j + 1][n - 1] if j < n - 1 else 1.0
                 Pp[i][j] += left * Qb[i][j] * right / Z
 
-    # 2. Enclosed contributions: iterate outer pair (I, J) from largest to smallest.
-    for length in range(n, 4, -1):
+    # 2. Enclosed contributions: iterate outer pair (I, J) from largest to
+    #    smallest.  Down to length 2: an inter-strand pair spanning a nick can be
+    #    short and still enclose another (coaxial) pair across the junction.
+    for length in range(n, 1, -1):
         for I in range(n - length + 1):
             J = I + length - 1
             if Qb[I][J] <= 0 or Pp[I][J] <= 0:
                 continue
-            base = Pp[I][J] / Qb[I][J]
+            # Every inside contribution to Qb[I][J] carries one bp_salt_factor
+            # (applied to the whole _qb_val), so the outside must re-apply it when
+            # distributing the (I,J) probability to the pairs it encloses.
+            base = (Pp[I][J] / Qb[I][J]) * bp_salt_factor
 
             # 2a. Stack: inner pair (I+1, J-1)
             i, j = I + 1, J - 1
-            if j - i >= 4 and _can_pair_nicks(seq, i, j, pairs, nicks) and Qb[i][j] > 0:
+            if j > i and _can_pair_nicks(seq, i, j, pairs, nicks) and Qb[i][j] > 0:
                 stack_e = _stack_energy(seq, I, J, material)
                 Pp[i][j] += base * Qb[i][j] * _boltzmann(stack_e, T)
 
@@ -673,9 +818,31 @@ def _pair_probs_outside(
                     il_e = _interior_bulge_energy(seq, I, J, ip, jp, nl, nr, material)
                     Pp[ip][jp] += base * Qb[ip][jp] * _boltzmann(il_e, T)
 
+            # 2c. Multiloop: (I,J) closes a multiloop; (i,j) is one inner branch.
+            #     left/right over [I+1,i-1] / [j+1,J-1] are each (all-unpaired) or
+            #     (≥1 branch: QM); subtracting the both-unpaired product enforces
+            #     that (i,j) is never the sole branch (≥2 branches required).
+            ml_coeff = base * bm_ml_init_pair * bm_ml_pair
+            if ml_coeff > 0.0:
+                for i in range(I + 1, J):
+                    lead_left = bm_ml_base ** (i - 1 - I)         # I+1..i-1 unpaired
+                    qm_left = QM[I + 1][i - 1] if (i - 1) >= (I + 1) else 0.0
+                    for j in range(i + 1, J):
+                        if Qb[i][j] <= 0.0:
+                            continue
+                        lead_right = bm_ml_base ** (J - 1 - j)    # j+1..J-1 unpaired
+                        qm_right = QM[j + 1][J - 1] if (J - 1) >= (j + 1) else 0.0
+                        # ≥2 branches ⇒ at least one of the left/right regions has
+                        # a branch.  Expanded (cancellation-free) form of
+                        #   (lead_left+qm_left)(lead_right+qm_right) − lead_left·lead_right
+                        valid = (lead_left * qm_right + qm_left * lead_right
+                                 + qm_left * qm_right)
+                        if valid > 0.0:
+                            Pp[i][j] += ml_coeff * Qb[i][j] * valid
+
     # Symmetrize
     for i in range(n):
-        for j in range(i + 4, n):
+        for j in range(i + 1, n):
             if Pp[i][j] > 0:
                 Pp[j][i] = Pp[i][j]
     return Pp
@@ -713,6 +880,7 @@ def multistrand_pairs(
     Q  = np.zeros((n, n))
     Qb = np.zeros((n, n))
     QM = np.zeros((n, n))
+    QM1 = np.zeros((n, n))
     for i in range(n):
         Q[i][i] = 1.0
     for i in range(n - 1):
@@ -721,14 +889,18 @@ def multistrand_pairs(
     from strider.thermo.salt import dg_per_bp_salt
     bp_salt_factor = _boltzmann(dg_per_bp_salt(sodium_M, magnesium_M), T)
 
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks, bp_salt_factor=bp_salt_factor)
+    _fill_dp_nicks(seq, Q, Qb, QM, QM1, n, T, pairs, material, nicks,
+                   bp_salt_factor=bp_salt_factor)
     _apply_coaxial_external(seq, Q, Qb, n, T, material)
 
     Z = Q[0][n - 1]
     if Z <= 0:
         Z = 1.0
     dG = -R * T * math.log(Z)
-    probs = _pair_probs_outside(seq, Q, Qb, n, Z, T, pairs, material, nicks)
+    Qnd = _external_Q_nodangle(Qb, n)
+    Znd = Qnd[0][n - 1] if Qnd[0][n - 1] > 0 else 1.0
+    probs = _pair_probs_outside(seq, Qnd, Qb, QM, QM1, n, Znd, T, pairs, material,
+                                nicks, bp_salt_factor=bp_salt_factor)
     return dG, probs
 
 
@@ -774,6 +946,7 @@ def _multistrand_dg(
     Q  = np.zeros((n, n))
     Qb = np.zeros((n, n))
     QM = np.zeros((n, n))
+    QM1 = np.zeros((n, n))
     for i in range(n):
         Q[i][i] = 1.0
     for i in range(n - 1):
@@ -782,7 +955,8 @@ def _multistrand_dg(
     from strider.thermo.salt import dg_per_bp_salt
     bp_salt_factor = _boltzmann(dg_per_bp_salt(sodium_M, magnesium_M), T)
 
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks, bp_salt_factor=bp_salt_factor)
+    _fill_dp_nicks(seq, Q, Qb, QM, QM1, n, T, pairs, material, nicks,
+                   bp_salt_factor=bp_salt_factor)
     _apply_coaxial_external(seq, Q, Qb, n, T, material)
 
     Z = Q[0][n - 1]

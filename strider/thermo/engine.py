@@ -435,13 +435,15 @@ class ThermoEngine:
     # ─── helpers ─────────────────────────────────────────────────────────────
 
     def _resolve_backend(self, backend: BackendName) -> str:
-        """Resolve 'auto' to the best available backend; pass explicit names through unchanged."""
+        """Resolve 'auto' to strider's own native engine; pass explicit names through.
+
+        ``native`` is the authoritative, always-available, dependency-free engine
+        and the default.  ``vienna`` is an *optional* cross-check backend you must
+        request explicitly (``backend='vienna'``) — it is never auto-selected, so
+        strider's results never silently depend on an external library.
+        """
         if backend != "auto":
             return backend
-        available = self.available_backends()
-        for preferred in ("vienna", "native"):
-            if preferred in available:
-                return preferred
         return "native"
 
     def _cache_key(self, op: str, sequences: tuple[str, ...]) -> str:

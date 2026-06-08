@@ -68,24 +68,25 @@ def sample_structures(
     Q  = np.zeros((n, n))
     Qb = np.zeros((n, n))
     QM = np.zeros((n, n))
+    QM1 = np.zeros((n, n))
     for i in range(n):
         Q[i][i] = 1.0
     for i in range(n - 1):
         Q[i][i + 1] = 1.0
 
-    _fill_dp_nicks(seq, Q, Qb, QM, n, T, pairs, material, nicks=[])
+    _fill_dp_nicks(seq, Q, Qb, QM, QM1, n, T, pairs, material, nicks=[])
     _apply_coaxial_external(seq, Q, Qb, n, T, material)
 
     results = []
     for _ in range(n_samples):
         pair_list: list[tuple[int, int]] = []
-        _sample_Q(seq, 0, n - 1, Q, Qb, QM, T, pairs, material, pair_list, rng)
+        _sample_Q(seq, 0, n - 1, Q, Qb, QM, QM1, T, pairs, material, pair_list, rng)
         pair_list.sort()
         results.append((to_dot_bracket(pair_list, n), pair_list))
     return results
 
 
-def _sample_Q(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
+def _sample_Q(seq, i, j, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng):
     """Stochastic traceback through Q[i][j] (external context)."""
     while i <= j:
         # Compute contributions: (j unpaired) + Σ_k (stem (k,j) with various dangles)
@@ -112,9 +113,9 @@ def _sample_Q(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
             cum += contrib
             if target < cum:
                 out_pairs.append((k, j))
-                _sample_Qb(seq, k, j, Q, Qb, QM, T, pairs, material, out_pairs, rng)
+                _sample_Qb(seq, k, j, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
                 # Continue with left subproblem [i..k-1]
-                _sample_Q(seq, i, k - 1, Q, Qb, QM, T, pairs, material, out_pairs, rng)
+                _sample_Q(seq, i, k - 1, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
                 chosen = True
                 break
         if chosen:
@@ -123,7 +124,20 @@ def _sample_Q(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
         j -= 1
 
 
-def _sample_Qb(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
+def _ml_factors(material, T):
+    from strider.thermo._param_context import lookup_scalar
+    if material == "dna":
+        from strider.thermo.parameters_dna import ML_INIT, ML_PAIR, ML_BASE
+    else:
+        from strider.thermo.parameters_rna import ML_INIT, ML_PAIR, ML_BASE
+    ML_INIT = lookup_scalar("multiloop_init", float(ML_INIT))
+    ML_PAIR = lookup_scalar("multiloop_pair", float(ML_PAIR))
+    ML_BASE = lookup_scalar("multiloop_base", float(ML_BASE))
+    return (_boltzmann(ML_INIT + ML_PAIR, T), _boltzmann(ML_PAIR, T),
+            _boltzmann(ML_BASE, T))
+
+
+def _sample_Qb(seq, i, j, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng):
     """Stochastic traceback through Qb[i][j] (forced pair at i, j)."""
     if Qb[i][j] <= 0:
         return
@@ -140,7 +154,7 @@ def _sample_Qb(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
         cum += _boltzmann(_stack_energy(seq, i, j, material), T) * Qb[i + 1][j - 1]
         if target < cum:
             out_pairs.append((i + 1, j - 1))
-            _sample_Qb(seq, i + 1, j - 1, Q, Qb, QM, T, pairs, material, out_pairs, rng)
+            _sample_Qb(seq, i + 1, j - 1, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
             return
 
     # 3. Interior loop / bulge
@@ -162,66 +176,72 @@ def _sample_Qb(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
             cum += Qb[ip][jp] * _boltzmann(dG, T)
             if target < cum:
                 out_pairs.append((ip, jp))
-                _sample_Qb(seq, ip, jp, Q, Qb, QM, T, pairs, material, out_pairs, rng)
+                _sample_Qb(seq, ip, jp, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
                 return
 
-    # 4. Multiloop closed by (i, j)
-    from strider.thermo._param_context import lookup_scalar
-    if material == "dna":
-        from strider.thermo.parameters_dna import ML_INIT, ML_PAIR
-    else:
-        from strider.thermo.parameters_rna import ML_INIT, ML_PAIR
-    ML_INIT = lookup_scalar("multiloop_init", float(ML_INIT))
-    ML_PAIR = lookup_scalar("multiloop_pair", float(ML_PAIR))
-    bm_ml = _boltzmann(ML_INIT + ML_PAIR, T)
+    # 4. Multiloop closed by (i, j) — ≥2 branches: QM[i+1][k-1]·QM1[k][j-1]
+    bm_ml_init_pair, _, _ = _ml_factors(material, T)
     if j - i > 2:
-        cum += bm_ml * QM[i + 1][j - 1]
-        if target < cum:
-            _sample_QM(seq, i + 1, j - 1, Q, Qb, QM, T, pairs, material, out_pairs, rng)
-            return
+        for k in range(i + 2, j):
+            qm_left = QM[i + 1][k - 1]
+            if qm_left <= 0:
+                continue
+            q1 = QM1[k][j - 1]
+            if q1 <= 0:
+                continue
+            cum += bm_ml_init_pair * qm_left * q1
+            if target < cum:
+                _sample_QM(seq, i + 1, k - 1, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
+                _sample_QM1(seq, k, j - 1, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
+                return
 
 
-def _sample_QM(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng):
-    """Stochastic traceback through QM[i][j] (multiloop region with ≥ 1 stem)."""
-    from strider.thermo._param_context import lookup_scalar
-    if material == "dna":
-        from strider.thermo.parameters_dna import ML_PAIR, ML_BASE
-    else:
-        from strider.thermo.parameters_rna import ML_PAIR, ML_BASE
-    ML_PAIR = lookup_scalar("multiloop_pair", float(ML_PAIR))
-    ML_BASE = lookup_scalar("multiloop_base", float(ML_BASE))
-    bm_ml_pair = _boltzmann(ML_PAIR, T)
-    bm_ml_base = _boltzmann(ML_BASE, T)
-
+def _sample_QM1(seq, i, j, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng):
+    """Traceback through QM1[i][j]: one branch block — stem at i + trailing unpaired."""
+    _, bm_ml_pair, bm_ml_base = _ml_factors(material, T)
     while i <= j:
-        total = QM[i][j]
+        total = QM1[i][j]
         if total <= 0:
             return
         target = rng.random() * total
         cum = 0.0
-        # Option 1: single stem (i, j)
+        # stem ends exactly at j
         if Qb[i][j] > 0:
             cum += Qb[i][j] * bm_ml_pair
             if target < cum:
                 out_pairs.append((i, j))
-                _sample_Qb(seq, i, j, Q, Qb, QM, T, pairs, material, out_pairs, rng)
+                _sample_Qb(seq, i, j, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
                 return
-        # Option 2: j unpaired
-        if QM[i][j - 1] > 0:
-            cum += QM[i][j - 1] * bm_ml_base
-            if target < cum:
-                j -= 1
-                continue
-        # Option 3: stem [k, j] + multiloop [i, k-1]
-        for k in range(i + 1, j):
-            if Qb[k][j] > 0 and QM[i][k - 1] > 0:
-                cum += QM[i][k - 1] * Qb[k][j] * bm_ml_pair
-                if target < cum:
-                    out_pairs.append((k, j))
-                    _sample_Qb(seq, k, j, Q, Qb, QM, T, pairs, material, out_pairs, rng)
-                    _sample_QM(seq, i, k - 1, Q, Qb, QM, T, pairs, material, out_pairs, rng)
-                    return
-        return  # safety fallthrough
+        # j unpaired (trailing)
+        if j > i and QM1[i][j - 1] > 0:
+            j -= 1
+            continue
+        return
+
+
+def _sample_QM(seq, i, j, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng):
+    """Traceback through QM[i][j]: ≥1 branch block, leading unpaired allowed."""
+    _, _, bm_ml_base = _ml_factors(material, T)
+    total = QM[i][j]
+    if total <= 0:
+        return
+    target = rng.random() * total
+    cum = 0.0
+    # QM[i][j] = Σ_k (b_base^(k-i) + QM[i][k-1]) · QM1[k][j]
+    for k in range(i, j):
+        q1 = QM1[k][j]
+        if q1 <= 0:
+            continue
+        lead = bm_ml_base ** (k - i)
+        prev = QM[i][k - 1] if k > i else 0.0
+        contrib = (lead + prev) * q1
+        cum += contrib
+        if target < cum:
+            # decide: leading-unpaired-only (i..k-1 unpaired) vs earlier branches
+            if k > i and rng.random() * (lead + prev) >= lead:
+                _sample_QM(seq, i, k - 1, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
+            _sample_QM1(seq, k, j, Q, Qb, QM, QM1, T, pairs, material, out_pairs, rng)
+            return
 
 
 # ─── Suboptimal structures ────────────────────────────────────────────────────

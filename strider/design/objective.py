@@ -89,6 +89,65 @@ class DesignObjective:
         return obj
 
     @classmethod
+    def reaction_driving_force(
+        cls,
+        engine: "ThermoEngine",
+        reactants: list,
+        products: list,
+        max_ddg: float,
+        assemble_fn: "Callable[[dict[str, str]], dict[str, str]] | None" = None,
+        weight: float = 1.0,
+        label: str | None = None,
+    ) -> "DesignObjective":
+        """
+        Penalize a reaction whose driving force is weaker than a gate.
+
+        This is the design-time mirror of the
+        :func:`strider.circuits.checks.reaction_driving_force` *check* — a
+        one-sided coupling constraint that keeps a circuit-level driving force
+        on-spec while the optimizer tunes a *different* domain.  It generalizes
+        urotrace's R2-preservation term (penalize the with-handle branch-
+        migration ΔΔG from drifting above its gate while designing the capture
+        handle): the constraint couples the designed domain to a reaction it does
+        not appear in directly.
+
+        ``reactants`` / ``products`` are lists whose elements are either a strand
+        *name* (a key resolved from the assembled sequences) or a list of names
+        (a multi-strand complex), matching :meth:`ThermoEngine.ddg`.
+
+        ``assemble_fn`` maps the optimizer's designed-domain dict to the full
+        strand dict before name resolution, so the gate is measured on the
+        *assembled* context (e.g. the handle attached to H1), not on the bare
+        designed domain.  When ``None`` the names are resolved directly from the
+        sequences passed to the objective.
+
+        Penalty: ``max(0, ΔΔG_actual − max_ddg)²`` (0 when the gate is met).
+        """
+        lbl = label or (
+            f"reaction_driving_force(≤{max_ddg:.1f})"
+        )
+
+        def _resolve(item, strands: dict[str, str]):
+            if isinstance(item, str):
+                return strands[item]
+            return [strands[n] for n in item]
+
+        def fn(seqs: dict[str, str]) -> float:
+            strands = assemble_fn(seqs) if assemble_fn is not None else seqs
+            try:
+                r = [_resolve(x, strands) for x in reactants]
+                p = [_resolve(x, strands) for x in products]
+            except KeyError:
+                return 0.0
+            ddg = engine.ddg(r, p)
+            return max(0.0, ddg - max_ddg) ** 2
+
+        obj = cls()
+        obj._terms = [(weight, fn)]
+        obj._labels = [lbl]
+        return obj
+
+    @classmethod
     def minimize_leakage(
         cls,
         engine: "ThermoEngine",
