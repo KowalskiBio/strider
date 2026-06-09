@@ -10,6 +10,8 @@ from strider.thermo.differentiable import (
     ThermoParameters,
     BatchedPartitionFunction,
     batched_free_energy,
+    soft_free_energy,
+    seq_to_probs,
 )
 from strider import ThermoEngine
 
@@ -173,6 +175,65 @@ def test_batched_free_energy_helper_matches_model():
     with torch.no_grad():
         direct = model(seqs).tolist()
     assert helper == pytest.approx(direct, abs=1e-9)
+
+
+def test_soft_forward_matches_discrete_one_hot():
+    """
+    The sequence-differentiable relaxation (`soft_forward`) must reduce to the
+    discrete engine in the one-hot limit: feeding one-hot base distributions
+    reproduces the discrete `forward` (and hence the native engine) to within the
+    relaxation residual (it drops the small tri/tetraloop special-loop bonuses).
+    """
+    params = ThermoParameters(material="rna")
+    model = BatchedPartitionFunction(params)
+    seqs = _random_seqs("ACGU", (8, 12, 16, 20, 24, 30), reps=2, seed=0)
+    with torch.no_grad():
+        disc = model(seqs)
+        soft = model.soft_forward(seq_to_probs(seqs))
+    errs = (soft - disc).abs()
+    assert errs.mean() < 0.3, f"soft vs discrete mean |err|={errs.mean():.3f}"
+    assert errs.max() < 1.0, f"soft vs discrete max |err|={errs.max():.3f}"
+
+
+def test_soft_forward_sequence_gradient():
+    """Gradients must flow to the sequence distribution itself (not just params)."""
+    params = ThermoParameters(material="rna")
+    probs = seq_to_probs(["GGGCUUCGGCCC", "AUGCAUGC"]).requires_grad_(True)
+    dg = soft_free_energy(probs, params=params)
+    dg.sum().backward()
+    assert probs.grad is not None
+    assert torch.isfinite(probs.grad).all()
+    assert probs.grad.norm() > 0.0
+
+
+def test_soft_forward_design_step_reduces_loss():
+    """A handful of Adam steps on sequence logits must reduce a target-ΔG loss."""
+    import torch.nn.functional as F
+    torch.manual_seed(0)
+    params = ThermoParameters(material="rna")
+    model = BatchedPartitionFunction(params)
+    target = torch.tensor([-10.0], dtype=torch.float64)
+    logits = torch.randn(1, 24, 4, dtype=torch.float64, requires_grad=True)
+    opt = torch.optim.Adam([logits], lr=0.2)
+
+    def loss_of(logits):
+        probs = torch.softmax(logits, dim=-1)
+        hard = F.one_hot(probs.argmax(-1), 4).double()
+        dg_soft = model.soft_forward(probs)
+        with torch.no_grad():
+            dg_hard = model.soft_forward(hard)
+        dg = dg_hard + (dg_soft - dg_soft.detach())
+        return ((dg - target) ** 2).mean()
+
+    with torch.no_grad():
+        start = loss_of(logits).item()
+    for _ in range(15):
+        opt.zero_grad()
+        loss_of(logits).backward()
+        opt.step()
+    with torch.no_grad():
+        end = loss_of(logits).item()
+    assert end < start, f"design loss did not drop: {start:.3f} -> {end:.3f}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

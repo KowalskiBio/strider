@@ -35,12 +35,12 @@ def _can_pair(a: str, b: str, material: str) -> bool:
         wc = {("A", "T"), ("T", "A"), ("G", "C"), ("C", "G")}
     return (a, b) in wc
 
-def logsumexp_RT(energies, dim=0):
+def logsumexp_RT(energies: list[torch.Tensor], dim: int = 0) -> torch.Tensor:
     """
     Computes -RT * ln(sum(exp(-E/RT))) for a list of energy tensors.
     """
     if not energies:
-        return None
+        raise ValueError("energies list must not be empty")
     if len(energies) == 1:
         return energies[0]
     
@@ -170,8 +170,11 @@ class ThermoParameters(nn.Module):
                 
         # Zero-initialize the final layer of each MLP so they start with 0.0 impact
         for mlp in [self.mlp_1_1, self.mlp_1_2, self.mlp_2_2]:
-            nn.init.zeros_(mlp[-1].weight)
-            nn.init.zeros_(mlp[-1].bias)
+            last_layer = mlp[-1]
+            if isinstance(last_layer, nn.Linear):
+                nn.init.zeros_(last_layer.weight)
+                if last_layer.bias is not None:
+                    nn.init.zeros_(last_layer.bias)
 
     def get_hairpin_size_energy(self, loop_len: int) -> torch.Tensor:
         if loop_len < len(self.hairpin_sizes):
@@ -624,7 +627,236 @@ class BatchedPartitionFunction(nn.Module):
             
         return torch.stack(res)
 
+    def soft_forward(self, probs: torch.Tensor) -> torch.Tensor:
+        """
+        Sequence-differentiable ensemble free energy ΔG (kcal/mol).
+
+        ``forward`` above takes discrete strings, so its autograd graph reaches
+        the *parameters* but not the *sequence* (the bases are hard integer
+        indices).  ``soft_forward`` instead consumes a continuous per-position
+        base distribution ``probs`` of shape ``(B, N, 4)`` — a point on the
+        product of probability simplices over {A, C, G, U/T} — and runs the same
+        McCaskill DP with every hard table lookup replaced by its expectation
+        under those distributions (a tensor contraction) and the hard pairability
+        mask replaced by a soft penalty ``-RT·log(p_pair)``.  This is a mean-field
+        relaxation that **reduces to the exact engine in the one-hot limit** and
+        is differentiable w.r.t. ``probs`` — which is exactly what gradient-based
+        sequence design needs and what a closed C kernel cannot provide.
+
+        The neural interior-loop MLP corrections are omitted; their final layers
+        are zero-initialised, so for an untrained :class:`ThermoParameters` they
+        contribute nothing and the relaxation stays faithful to the base engine.
+        Returns a 1-D tensor of free energies, one per row of ``probs``.
+        """
+        p = self.params
+        material = p.material
+        B, N, _ = probs.shape
+        device = probs.device
+        dtype = probs.dtype
+
+        ml_base = torch.exp(p.ml_base_raw)
+        ml_init = torch.exp(p.ml_init_raw)
+        ml_pair = torch.exp(p.ml_pair_raw)
+
+        # Reshaped lookup tables: integer flat-index -> (4,4,…) so a gather
+        # becomes an einsum against the position distributions.
+        stack4 = p.stack_table.view(4, 4, 4, 4)      # [i][i+1][j-1][j]
+        term4 = p.term_mismatch.view(4, 4, 4, 4)     # [j-1][j][i][i+1]
+        d5t = p.dangle_5.view(4, 4, 4)               # [k][j][k-1]
+        d3t = p.dangle_3.view(4, 4, 4)               # [j][j-1][k]
+        tp = p.terminal_penalty_lut                  # (4,4)
+
+        # Soft pairability weight p_pair(i,j) = P(bases i,j form a valid pair)
+        # under independent per-position distributions, turned into an additive
+        # closing-pair penalty.  One-hot -> 0 for a real pair, ~+12.8 kcal for an
+        # impossible one (eps floor), recovering the hard mask in the limit.
+        pairf = torch.zeros(4, 4, dtype=dtype, device=device)
+        wc = ([(0, 3), (3, 0), (2, 1), (1, 2), (2, 3), (3, 2)]
+              if material == "rna" else [(0, 3), (3, 0), (2, 1), (1, 2)])
+        for a, c in wc:
+            pairf[a, c] = 1.0
+        cval = torch.einsum("biw,bjx,wx->bij", probs, probs, pairf)
+        pairpen = -RT * torch.log(cval + 1e-9)
+
+        V = torch.full((B, N, N), INF, dtype=dtype, device=device)
+        W = torch.zeros((B, N, N), dtype=dtype, device=device)
+        M = torch.full((B, N, N), INF, dtype=dtype, device=device)
+        M1 = torch.full((B, N, N), INF, dtype=dtype, device=device)
+
+        for d in range(1, N):
+            num_i = N - d
+            i_idx = torch.arange(num_i, device=device)
+            j_idx = i_idx + d
+            ZERO_T = torch.zeros(B, num_i, dtype=dtype, device=device)
+            INF_T = torch.full((B, num_i), INF, dtype=dtype, device=device)
+
+            pi = probs[:, i_idx]            # (B, num_i, 4)
+            pj = probs[:, j_idx]
+            v_options = []
+
+            # 1. Hairpin loop closed by (i, j)
+            if d > MIN_HAIRPIN_LOOP:
+                hp_len = d - 1
+                hp_e = p.get_hairpin_size_energy(hp_len).expand(B, num_i)
+                if hp_len > 3:
+                    term_penalty = torch.einsum(
+                        "bnw,bnx,bny,bnz,wxyz->bn",
+                        probs[:, j_idx - 1], pj, pi, probs[:, i_idx + 1], term4)
+                else:
+                    term_penalty = ZERO_T
+                bonus = torch.einsum("bnw,bnx,wx->bn", pi, pj, tp)  # terminal penalty
+                v_options.append(hp_e + term_penalty + bonus)
+
+            # 2. Stacking onto the inner pair (i+1, j-1)
+            if d > MIN_HAIRPIN_LOOP + 1:
+                stack_val = torch.einsum(
+                    "bnw,bnx,bny,bnz,wxyz->bn",
+                    pi, probs[:, i_idx + 1], probs[:, j_idx - 1], pj, stack4)
+                v_options.append(stack_val + V[:, i_idx + 1, j_idx - 1])
+
+            # 3. Interior loops & bulges (size/asymmetry penalties are sequence
+            #    independent; only the terminal-pair and single-bulge-stack
+            #    corrections carry sequence dependence).
+            max_n = min(30, d - 2)
+            for n in range(1, max_n + 1):
+                if d - 2 - n <= 0:
+                    continue
+                nl = torch.arange(n + 1, device=device)
+                nr = n - nl
+                ip = i_idx.unsqueeze(1) + 1 + nl.unsqueeze(0)
+                jp = j_idx.unsqueeze(1) - 1 - nr.unsqueeze(0)
+                valid = (ip < N) & (jp >= 0) & (ip < jp)
+                ip_s = torch.clamp(ip, max=N - 1)
+                jp_s = torch.clamp(jp, min=0)
+                inner_v = V[:, ip_s, jp_s]                    # (B, num_i, n+1)
+
+                is_bulge = (nl == 0) | (nr == 0)
+                n_t = torch.tensor(n, device=device)
+                dG = torch.where(is_bulge,
+                                 p.get_bulge_size_energy(n_t),
+                                 p.get_interior_size_energy(n_t))
+                asym = torch.abs(nl - nr)
+                ninio_i = torch.clamp(torch.clamp(torch.min(nl, nr), max=4) - 1, min=0)
+                asym_pen = torch.min(p.asymmetry_ninio[4], asym * p.asymmetry_ninio[ninio_i])
+                dG = dG + torch.where(is_bulge, torch.zeros_like(asym_pen.double()), asym_pen)
+                dG_exp = dG.unsqueeze(0).unsqueeze(0).expand(B, num_i, n + 1)
+
+                p_ip = probs[:, ip_s]                         # (B, num_i, n+1, 4)
+                p_jp = probs[:, jp_s]
+                TP_outer = torch.einsum("bnw,bnx,wx->bn", pi, pj, tp)
+                TP_inner = torch.einsum("bnkw,bnkx,wx->bnk", p_ip, p_jp, tp)
+                if material == "rna":
+                    if n == 1:
+                        tp_corr = TP_outer.unsqueeze(-1) - TP_inner
+                    else:
+                        tp_corr = (2.0 * TP_outer).unsqueeze(-1).expand(-1, -1, n + 1)
+                else:
+                    tp_corr = TP_outer.unsqueeze(-1) - TP_inner
+                dG_exp = dG_exp + tp_corr
+
+                if n == 1:
+                    dG_exp = dG_exp + torch.einsum(
+                        "bnw,bnkx,bnky,bnz,wxyz->bnk", pi, p_ip, p_jp, pj, stack4)
+
+                interior = inner_v + dG_exp
+                int_scaled = torch.where(valid.unsqueeze(0), -interior / RT,
+                                         torch.tensor(-INF, dtype=dtype, device=device))
+                v_int = -RT * torch.logsumexp(int_scaled, dim=-1)
+                v_int = torch.where(torch.isinf(v_int),
+                                    torch.tensor(INF, dtype=dtype, device=device), v_int)
+                v_options.append(v_int)
+
+            # 4. Multiloop bifurcation
+            L_bif = d - 3
+            if L_bif > 0:
+                bif = []
+                for m in range(L_bif):
+                    k = i_idx + 2 + m
+                    bif.append(V[:, i_idx + 1, k] + M[:, k + 1, j_idx - 1])
+                bif_scaled = -(torch.stack(bif, dim=-1) + ml_pair) / RT
+                v_bif = -RT * torch.logsumexp(bif_scaled, dim=-1) + ml_init + ml_pair
+                v_options.append(v_bif)
+
+            if v_options:
+                # Add the soft closing-pair penalty once: every contribution to
+                # V[i,j] requires (i,j) to actually pair.
+                V[:, i_idx, j_idx] = logsumexp_RT(v_options, dim=0) + pairpen[:, i_idx, j_idx]
+
+            # M1 / M (multiloop segments)
+            m1_options = [V[:, i_idx, j_idx] + ml_pair]
+            if d >= 1:
+                m1_options.append(M1[:, i_idx + 1, j_idx] + ml_base)
+            M1[:, i_idx, j_idx] = logsumexp_RT(m1_options, dim=0)
+
+            m_options = [M1[:, i_idx, j_idx], M[:, i_idx, j_idx - 1] + ml_base]
+            for m_w in range(d):
+                k_w = i_idx + m_w
+                m_options.append(M[:, i_idx, k_w] + M1[:, k_w + 1, j_idx])
+            M[:, i_idx, j_idx] = logsumexp_RT(m_options, dim=0)
+
+            # W (external loop) with sign-gated 5'/3' dangle decorations
+            w_options = [W[:, i_idx, j_idx - 1]]
+            for m_w in range(d + 1):
+                k_w = i_idx + m_w
+                k1 = torch.clamp(k_w - 1, min=0)
+                k2 = torch.clamp(k_w - 2, min=0)
+                w_left = ZERO_T if m_w == 0 else W[:, i_idx, k1]
+                w_left5 = W[:, i_idx, k2] if m_w >= 2 else ZERO_T
+                pk = probs[:, k_w]
+                v_right = V[:, k_w, j_idx]
+                w_options.append(w_left + v_right)
+
+                if m_w >= 1:
+                    d5 = torch.einsum("bnw,bnx,bny,wxy->bn", pk, pj, probs[:, k1], d5t)
+                    w_options.append(torch.where(d5 < 0, w_left5 + v_right + d5, INF_T))
+
+                if m_w < d:
+                    j_m1 = j_idx - 1
+                    pjm1 = probs[:, j_m1]
+                    v_right_d3 = V[:, k_w, j_m1]
+                    d3 = torch.einsum("bnw,bnx,bny,wxy->bn", pj, pjm1, pk, d3t)
+                    d3_valid = d3 < 0
+                    w_options.append(torch.where(d3_valid, w_left + v_right_d3 + d3, INF_T))
+                    if m_w >= 1:
+                        d5_53 = torch.einsum("bnw,bnx,bny,wxy->bn", pk, pjm1, probs[:, k1], d5t)
+                        both = w_left5 + v_right_d3 + d5_53 + d3
+                        w_options.append(torch.where((d5_53 < 0) & d3_valid, both, INF_T))
+
+            W[:, i_idx, j_idx] = logsumexp_RT(w_options, dim=0)
+
+        return W[:, 0, N - 1]
+
+
 DifferentiableMFE = BatchedPartitionFunction
+
+
+def seq_to_probs(sequences: list[str], material: str = "rna",
+                 device: str | None = None) -> torch.Tensor:
+    """One-hot encode sequences to a ``(B, N, 4)`` probability tensor (A,C,G,U/T)."""
+    base_to_idx = {"A": 0, "C": 1, "G": 2, "U": 3, "T": 3}
+    B = len(sequences)
+    N = max(len(s) for s in sequences)
+    probs = torch.zeros(B, N, 4, dtype=torch.float64, device=device)
+    for b, s in enumerate(sequences):
+        for i, ch in enumerate(s.upper()):
+            probs[b, i, base_to_idx.get(ch, 0)] = 1.0
+    return probs
+
+
+def soft_free_energy(probs: torch.Tensor, material: str = "rna",
+                     params: "ThermoParameters | None" = None) -> torch.Tensor:
+    """
+    Sequence-differentiable ensemble ΔG for a soft sequence ``probs`` (B,N,4).
+
+    Thin wrapper around :meth:`BatchedPartitionFunction.soft_forward`; the
+    autograd graph reaches ``probs`` (and the parameters), enabling
+    gradient-based sequence design.  See ``soft_forward`` for the relaxation.
+    """
+    if params is None:
+        params = ThermoParameters(material=material)
+    if probs.device != params.stack_table.device:
+        params = params.to(probs.device)
+    return BatchedPartitionFunction(params).soft_forward(probs)
 
 
 def batched_free_energy(

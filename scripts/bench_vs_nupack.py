@@ -25,19 +25,19 @@ import json
 import random
 import statistics
 import time
-from typing import Iterable
+from typing import Iterable, Literal
 
 from strider.thermo.engine import ThermoEngine
 
 try:
-    from nupack import Model, pfunc as nupack_pfunc
+    from nupack import Model, pfunc as nupack_pfunc  # type: ignore
 
     _HAS_NUPACK = True
 except ImportError:  # pragma: no cover - depends on external install
     _HAS_NUPACK = False
 
 
-def random_sequence(n: int, material: str, rng: random.Random) -> str:
+def random_sequence(n: int, material: Literal["dna", "rna"], rng: random.Random) -> str:
     alphabet = "ACGU" if material == "rna" else "ACGT"
     return "".join(rng.choice(alphabet) for _ in range(n))
 
@@ -55,7 +55,7 @@ def run(
     lengths: Iterable[int],
     n_seqs: int,
     reps: int,
-    material: str,
+    material: Literal["dna", "rna"],
     celsius: float,
     seed: int,
 ) -> dict:
@@ -108,7 +108,7 @@ def run(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--lengths", type=int, nargs="+", default=[20, 50, 100])
+    ap.add_argument("--lengths", type=int, nargs="+", default=[20, 50, 100, 150])
     ap.add_argument("--n-seqs", type=int, default=8)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--material", choices=["rna", "dna"], default="rna")

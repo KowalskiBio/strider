@@ -45,3 +45,10 @@ addopts = "-m 'not slow'"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.pyright]
+# Figure scripts in paper/figures/ do a bare `import _style` which works at
+# runtime (Python adds the script directory to sys.path), but Pylance only
+# searches from the project root.  Adding the figures directory here silences
+# the false-positive "Cannot find module '_style'" error.
+extraPaths = ["paper/figures"]
