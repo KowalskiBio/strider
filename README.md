@@ -7,13 +7,13 @@
 <p align="center"><em>Nucleic Acid Thermodynamics, Kinetics, and Circuit Design</em></p>
 
 <p align="center">
-<a href="#running-the-tests"><img src="https://img.shields.io/badge/tests-436%20passed-brightgreen" alt="Tests"></a>
+<a href="#running-the-tests"><img src="https://img.shields.io/badge/tests-445%20passed-brightgreen" alt="Tests"></a>
 <a href="#installation"><img src="https://img.shields.io/badge/python-%E2%89%A53.10-blue" alt="Python"></a>
 <a href="#license"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License: MIT"></a>
 </p>
 
 <!-- Original badges, superseded by the centered block above:
-[![Tests](https://img.shields.io/badge/tests-436%20passed-brightgreen)](#running-the-tests)
+[![Tests](https://img.shields.io/badge/tests-445%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 -->
@@ -311,6 +311,27 @@ print(f"Ensemble ΔG = {result.free_energy:.2f} kcal/mol")
 print(f"Partition function Q = {result.partition_function:.3e}")
 print(f"Pair probability matrix shape: {result.pair_probs.shape}")   # (9, 9)
 ```
+
+#### Hairpin melting temperature
+
+A hairpin melts unimolecularly (folded ⇌ open), so its Tm is concentration-independent and is the temperature at which the folding free energy vanishes, `Tm = ΔH / ΔS`. strider derives **both the ΔG and the Tm from the same engine**: the Tm reuses the folding model's own ΔG₃₇ together with the SantaLucia stack enthalpies (the folding `STACK` table and the `DNA_NN` ΔH/ΔS agree to ≤0.015 kcal/mol — two views of the same SantaLucia 2004 set), so `ΔG(Tm) = 0` by construction. There is no separate duplex-Tm path that can drift away from the reported folding ΔG.
+
+```python
+from strider import hairpin_tm, hairpin_thermo, fraction_folded
+
+seq = 'CTTTCAACACTGTTGCAGTAA'
+
+# Tm at the experimental buffer (Mg²⁺ via the per-base-pair salt model)
+tm = hairpin_tm(seq, sodium_M=0.05, magnesium_M=0.010)
+print(f"Tm = {tm:.1f} °C")                       # Tm = 40.1 °C
+
+# Full two-state thermodynamics + the closed-state melt curve
+th = hairpin_thermo(seq, sodium_M=0.05, magnesium_M=0.010)
+print(f"ΔH = {th.dH:.1f}  ΔS = {th.dS:.1f}  ΔG₃₇ = {th.dG37:+.2f}")
+print(f"folded fraction @37 °C = {fraction_folded(seq, 37, 0.05, 0.010):.2f}")
+```
+
+> Two-state, single-hairpin only (bulges/multiloops raise `ValueError` — use `pfunc` for those). A hairpin Tm is hypersensitive to the ΔH/ΔS bookkeeping (a ~few-percent shift moves Tm by tens of °C), so treat the absolute value as calibratable against experiment rather than exact.
 
 #### Reaction ΔΔG
 
@@ -1963,7 +1984,7 @@ pip install -e .[dev]
 pytest tests/ -v
 ```
 
-The test suite has **436 tests, all green** (1 skipped — a torch/mantis-integration test when the optional dep is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
+The test suite has **445 tests, all green** (1 skipped — a torch/mantis-integration test when the optional dep is not installed; 4 `slow` benchmark / convergence tests deselected by default, run with `pytest -m slow`). No external thermodynamic tool is required to run the full suite.
 
 | File | Tests | What is covered |
 |---|---|---|
