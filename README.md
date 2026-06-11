@@ -1996,17 +1996,6 @@ The test suite has **436 tests, all green** (1 skipped — a torch/mantis-integr
 
 ## Troubleshooting
 
-### `ModuleNotFoundError: No module named 'strider'`
-
-Install from the correct directory — the one containing `pyproject.toml`:
-
-```bash
-cd /path/to/strider   # must contain pyproject.toml
-pip install -e .
-```
-
-Running `pip install -e .` from a parent directory will not work.
-
 ### Multi-strand pair probabilities near a nick
 
 The native McCaskill outside recurrence is the exact adjoint of the inside recurrence: pair probabilities (and `TubeResult.defect`) satisfy the unpaired-marginal identity `Σ_j P(i,j) = 1 − P_unpaired(i)` to numerical precision, including pairs inside multiloops (previously underestimated). This now holds for **single- and multi-strand** complexes at **every** position — the immediate nick-junction pair `(i, i+1)` straddling a strand boundary (the coaxial closing pair) is exact too. The earlier over-count there was an artifact of the *constrained* (unpaired-marginal) partition, not the pair probabilities: forcing a position unpaired must not flip the inter-strand terminal-penalty leaf gate, which is a sequence-only model-shape decision. Validated against an exact brute-force enumeration of the model. Equilibrium concentrations and free energies are unaffected (they consume ΔG only).

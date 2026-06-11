@@ -124,7 +124,14 @@ from strider.circuits import (
     no_spurious_dimer, leakage_below_signal,
 )
 
-__version__ = "0.2.0"
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+try:
+    # Derived from git tags at build time via setuptools-scm.
+    __version__ = _pkg_version("strider-dna")
+except PackageNotFoundError:  # source tree that was never installed
+    __version__ = "0.0.0+unknown"
+
 __author__ = "Emilio Venegas"
 __license__ = "MIT"
 
