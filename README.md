@@ -1,8 +1,22 @@
-# strider-dna — Nucleic Acid Thermodynamics, Kinetics, and Circuit Design
+<!-- Placeholder logo — replace docs/assets/logo.svg with final artwork (a transparent PNG/SVG both work). -->
+<p align="center">
+  <img src="docs/assets/banner.png" alt="strider banner" width="1280">
+</p>
 
+<h1 align="center">strider-dna</h1>
+<p align="center"><em>Nucleic Acid Thermodynamics, Kinetics, and Circuit Design</em></p>
+
+<p align="center">
+<a href="#running-the-tests"><img src="https://img.shields.io/badge/tests-436%20passed-brightgreen" alt="Tests"></a>
+<a href="#installation"><img src="https://img.shields.io/badge/python-%E2%89%A53.10-blue" alt="Python"></a>
+<a href="#license"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License: MIT"></a>
+</p>
+
+<!-- Original badges, superseded by the centered block above:
 [![Tests](https://img.shields.io/badge/tests-436%20passed-brightgreen)](#running-the-tests)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](#installation)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
+-->
 
 **strider** is a Python library for computing the thermodynamics and kinetics of DNA/RNA circuits. Given a set of strand sequences, it predicts free energies via nearest-neighbor parameters, folds secondary structures via dynamic programming, derives TMSD rate constants from the Zhang & Winfree (2009) empirical model, enumerates spurious leakage pathways, and produces kinetic rate dictionaries that drop directly into a mantis-delta `CRNetwork`. The full pipeline — sequence → thermodynamics → kinetics → reaction network → steady states / stochastic trajectories / bifurcation — runs end-to-end with **zero external thermodynamic dependencies** under an MIT license.
 

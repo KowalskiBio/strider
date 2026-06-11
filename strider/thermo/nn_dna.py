@@ -132,21 +132,15 @@ def melting_temperature(
     dH, dS = duplex_dh_ds(seq)
     self_comp = is_self_complementary(seq)
 
+    # Standard two-state formula. Symmetry is already folded into dS by
+    # duplex_dh_ds() for self-complementary strands; _ln_CT picks CT vs CT/4.
     CT = strand_conc_M
-    if self_comp:
-        dS_eff = dS + SYMMETRY[1]
-        Tm_1M = dH * 1000.0 / (dS_eff + R * 1000.0 * (1.0 / CT))
-    else:
-        Tm_1M = dH * 1000.0 / (dS + R * 1000.0 * (1.0 / CT) - R * 1000.0 * (1.0 / 4.0))
-
-    # Simplified: Tm = ΔH / (ΔS + R ln CT) - 273.15 (standard non-self-comp formula)
-    Tm_1M = (dH * 1000.0) / (dS + R * 1000.0 * _ln_CT(CT, self_comp)) - 273.15
+    tm = (dH * 1000.0) / (dS + R * 1000.0 * _ln_CT(CT, self_comp)) - 273.15
 
     if sodium_M != 1.0 or magnesium_M > 0:
-        correction = owczarzy_tm_correction(seq, sodium_M, magnesium_M)
-        Tm_1M += correction
+        tm += owczarzy_tm_correction(seq, sodium_M, magnesium_M)
 
-    return Tm_1M
+    return tm
 
 
 # ─── internals ───────────────────────────────────────────────────────────────
