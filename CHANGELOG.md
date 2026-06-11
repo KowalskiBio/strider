@@ -5,6 +5,13 @@ This file is generated from the git history by [git-cliff](https://git-cliff.org
 The format follows [Keep a Changelog](https://keepachangelog.com) and the project
 uses [Semantic Versioning](https://semver.org).
 
+## [0.3.1] - 2026-06-11
+
+### Features
+
+- Add hairpin melting temperature calculation and thermodynamics module
+- Add hairpin thermodynamic functions and update test coverage badge
+
 ## [0.3.0] - 2026-06-11
 
 ### Features
