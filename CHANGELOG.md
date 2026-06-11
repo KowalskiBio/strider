@@ -5,6 +5,13 @@ This file is generated from the git history by [git-cliff](https://git-cliff.org
 The format follows [Keep a Changelog](https://keepachangelog.com) and the project
 uses [Semantic Versioning](https://semver.org).
 
+## [0.3.2] - 2026-06-11
+
+### Features
+
+- Add DNA loop ΔH tables for temperature-resolved energetics
+- Structure-resolved ΔG/ΔH for hairpin Tm; unify hairpin API
+
 ## [0.3.1] - 2026-06-11
 
 ### Features
