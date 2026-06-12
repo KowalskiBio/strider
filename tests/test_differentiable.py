@@ -242,3 +242,79 @@ def test_cuda_matches_cpu():
     cpu = batched_free_energy(seqs, material="rna", device="cpu").tolist()
     cuda = batched_free_energy(seqs, material="rna", device="cuda").cpu().tolist()
     assert cuda == pytest.approx(cpu, abs=1e-6)
+
+
+# ── Base-pair probabilities (autodiff McCaskill) ────────────────────────────
+
+def test_bpp_matches_native_engine():
+    """BPP from ``∂F/∂bias`` must agree with the native McCaskill outside pass."""
+    import numpy as np
+    eng = ThermoEngine(material="rna", celsius=37.0)
+    model = BatchedPartitionFunction(ThermoParameters(material="rna"))
+    seqs = ["GGGCUUCGGCCC", "GGGAAACUCGAGUUUCCC", "GCGCAUAUGCGC"]
+    _, bpp = model.free_energy_and_bpp(seqs)
+    for b, s in enumerate(seqs):
+        n = len(s)
+        nat = np.asarray(eng.pairs(s))
+        if np.allclose(np.tril(nat, -1), 0.0):       # native is upper-triangular
+            nat = nat + nat.T
+        diff = bpp[b, :n, :n].numpy()
+        assert abs(diff - nat).mean() < 0.02
+        assert diff.sum(1).max() <= 1.0 + 1e-6       # row sums are probabilities
+
+
+def test_soft_bpp_matches_discrete_one_hot():
+    """The soft BPP reduces to the discrete BPP in the one-hot limit."""
+    model = BatchedPartitionFunction(ThermoParameters(material="rna"))
+    seqs = ["GGGCUUCGGCCC", "GCGCAUAUGCGC"]
+    disc = model.pair_probabilities(seqs)
+    soft = model.soft_pair_probabilities(seq_to_probs(seqs))
+    assert (soft - disc).abs().max() < 1e-2
+
+
+def test_bpp_gradient_flows_to_sequence():
+    """A BPP-based scalar must backpropagate to the soft sequence (2nd order)."""
+    model = BatchedPartitionFunction(ThermoParameters(material="rna"))
+    probs = torch.softmax(torch.randn(1, 14, 4, dtype=torch.float64), dim=-1)
+    probs = probs.detach().requires_grad_(True)
+    model.soft_pair_probabilities(probs).sum().backward()
+    assert probs.grad is not None and torch.isfinite(probs.grad).all()
+    assert probs.grad.abs().sum() > 0.0
+
+
+# ── Multi-strand complexes (nick-aware DP) ──────────────────────────────────
+
+@pytest.mark.parametrize("a,b", [
+    ("GCGCGC", "GCGCGC"), ("GGGAAA", "UUUCCC"),
+    ("ACGUACGU", "ACGUACGU"), ("GCAUGC", "GCAUGC"),
+])
+def test_complex_free_energy_matches_native(a, b):
+    """σ-corrected multi-strand ΔG must match native within the engine residual."""
+    from strider.thermo.differentiable import complex_free_energy
+    eng = ThermoEngine(material="rna", celsius=37.0)
+    cfe = complex_free_energy([a, b], material="rna").item()
+    nat = eng.pfunc(a, b).free_energy
+    assert abs(cfe - nat) < 1.0, f"{a}+{b}: diff={cfe:.3f} native={nat:.3f}"
+
+
+def test_soft_complex_matches_discrete_one_hot():
+    """Soft nick-aware fold reduces to the discrete nick-aware fold (one-hot)."""
+    from strider.thermo.differentiable import concat_with_nicks
+    model = BatchedPartitionFunction(ThermoParameters(material="rna"))
+    seq, nicks = concat_with_nicks(["GGGAAA", "UUUCCC"])
+    with torch.no_grad():
+        disc = model([seq], nicks=nicks)
+        soft = model.soft_forward(seq_to_probs([seq]), nicks=nicks)
+    assert (soft - disc).abs().max() < 1e-3
+
+
+def test_complex_pairs_no_hairpin_across_nick():
+    """Cross-strand pairs form; a hairpin loop never spans the nick."""
+    from strider.thermo.differentiable import complex_pair_probabilities, concat_with_nicks
+    seq, nicks = concat_with_nicks(["GGGGGG", "CCCCCC"])
+    bpp = complex_pair_probabilities(["GGGGGG", "CCCCCC"], material="rna").numpy()
+    # The dominant pairing is inter-strand (i in strand 1 with j in strand 2).
+    nick = nicks[0]
+    inter_mass = bpp[:nick, nick:].sum()
+    intra_mass = bpp[:nick, :nick].sum() + bpp[nick:, nick:].sum()
+    assert inter_mass > intra_mass

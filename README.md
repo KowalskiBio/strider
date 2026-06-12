@@ -1405,6 +1405,42 @@ Physical conventions wired identically across both engines:
 
 Training entry point is `strider/thermo/train.py`. The intended workflow is `BatchedPartitionFunction(ThermoParameters(material=...))` → torch optimizer over the parameter groups (physical tables on an aggressive LR, neural-residual MLPs on a conservative LR — see `tests/test_differentiable.py::test_toy_training_step` for the pattern).
 
+#### Gradient-based sequence design
+
+The differentiable engine is also differentiable **in the sequence**, which turns inverse design into gradient descent. The keystone is that the **base-pair-probability matrix is the gradient of the free energy** with respect to a per-pair energy bias — `∂F/∂ε_ij = P(i, j)` — so a single backward pass over a zero-valued bias field yields the whole McCaskill BPP matrix, differentiable a second time w.r.t. a *soft* sequence (a `(B, N, 4)` distribution over A/C/G/U). Every structure-level design objective is built on it.
+
+```python
+from strider.thermo.differentiable import pair_probabilities, soft_pair_probabilities
+from strider.thermo.diff_design import DiffObjective
+from strider.design.diff_designer import DifferentiableDesigner
+from strider.design.optimizer import DomainSpec
+from strider.design.objective import DesignObjective
+from strider import ThermoEngine
+
+# BPP by autodiff (matches ThermoEngine.pairs(); differentiable for soft seqs).
+bpp = pair_probabilities(["GGGCAGCCUUCGGCUGCCC"], material="rna")   # (1, N, N)
+
+# Compose a differentiable objective: hit a target structure, band GC, avoid runs.
+target = "(((((((....)))))))"
+objective = (DiffObjective.ensemble_defect(target)
+             + 0.2 * DiffObjective.gc_band(0.4, 0.6)
+             + 0.1 * DiffObjective.forbidden_motifs(["GGGG", "CCCC"]))
+
+# Gradient descent on simplex logits, then a short SA polish (hybrid hand-off).
+eng = ThermoEngine(material="rna", celsius=37.0)
+designer = DifferentiableDesigner(material="rna", engine=eng, seed=0)
+result = designer.design(
+    {"hp": DomainSpec(length=len(target), material="rna")},
+    objective,
+    sa_objective=DesignObjective.ensemble_defect(eng, "hp", target),  # discrete polish
+)
+seq = result.sequences["hp"]              # e.g. CCACGUCAAUUGACGUGG; native MFE == target
+```
+
+`DiffObjective` is composed exactly like `DesignObjective` (weighted sum, `+`/`*`, `evaluate_breakdown`), with factories for **ensemble defect**, **ΔG / ΔΔG targets** (`free_energy_target` / `free_energy_range`), **GC content / band**, **toehold accessibility**, **pairing entropy**, and **forbidden motifs**. `DifferentiableDesigner` optimizes per-position base logits with Adam under a temperature schedule (free positions move, `DomainSpec(sequence=…)` domains are clamped), rounds to a discrete sequence, then hands off to the existing simulated-annealing `SequenceDesigner` — warm-started via its new `initial_sequences=` argument — for a short discrete polish, returning the same `DesignResult`.
+
+**Multi-strand complexes.** The nick-aware DP (`forward`/`soft_forward` with `nicks=`, plus `complex_free_energy` / `complex_pair_probabilities`) folds a concatenation of strands: cross-strand pairs may close at any separation, hairpins may not span a nick, and the homomeric **rotational-symmetry correction** `+RT·ln σ` is applied so the complex ΔG matches `ThermoEngine.pfunc(*strands)`. Pass `nicks=` to `DifferentiableDesigner.design` to co-design a duplex or toehold complex against its `ensemble_defect`. The differentiable BPP / defect agree with the native engine to the same ~0.3 kcal residual as the free energy (amplified into a ratio only on register-degenerate homopolymer stems); multi-strand ΔG agrees to ~0.5 kcal mean. See `examples/11_gradient_design.py` and `tests/test_diff_design.py`. The full multistate test-tube *equilibrium-concentration* design (differentiating through the concentration solve) is a tracked follow-up; single-complex defect design is supported today.
+
 ---
 
 ### 17. Export formats

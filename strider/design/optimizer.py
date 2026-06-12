@@ -119,6 +119,7 @@ class SequenceDesigner:
         parallel_tempering: bool = False,
         n_chains: int = 4,
         swap_every: int = 20,
+        initial_sequences: dict[str, str] | None = None,
     ) -> DesignResult:
         """
         Run sequence design optimization.
@@ -131,6 +132,12 @@ class SequenceDesigner:
         chains every ``swap_every`` steps; the lowest-temperature chain is
         used for the trial score.
 
+        ``initial_sequences`` warm-starts free domains from a given sequence
+        assignment instead of a random one (the rest are still randomized);
+        this is the hand-off point used by
+        :class:`~strider.design.diff_designer.DifferentiableDesigner` to polish a
+        gradient-descent solution with a short SA refinement.
+
         Returns the best result across all trials.
         """
         constraints = hard_constraints or []
@@ -142,13 +149,13 @@ class SequenceDesigner:
                 result = self._run_pt_trial(
                     domains, objective, constraints,
                     max_iterations, T_start, T_end, trial, verbose,
-                    mutation_policy, n_chains, swap_every,
+                    mutation_policy, n_chains, swap_every, initial_sequences,
                 )
             else:
                 result = self._run_trial(
                     domains, objective, constraints,
                     max_iterations, T_start, T_end, trial, verbose,
-                    mutation_policy,
+                    mutation_policy, initial_sequences,
                 )
             trial_scores.append(result.objective_value)
             if best is None or result.objective_value < best.objective_value:
@@ -175,13 +182,14 @@ class SequenceDesigner:
         trial_seed: int,
         verbose: bool,
         mutation_policy: "MutationPolicy | None",
+        initial_sequences: dict[str, str] | None = None,
     ) -> DesignResult:
         """Single-chain SA trial returning the best DesignResult found."""
         from strider.design.policies import RandomMutationPolicy
         rng = random.Random(self.rng.randint(0, 2**31) + trial_seed)
         policy = mutation_policy or RandomMutationPolicy()
 
-        seqs = self._initialize(domains, rng, constraints)
+        seqs = self._initialize(domains, rng, constraints, initial_sequences)
         current_score = objective(seqs)
         best_seqs = dict(seqs)
         best_score = current_score
@@ -239,6 +247,7 @@ class SequenceDesigner:
         mutation_policy: "MutationPolicy | None",
         n_chains: int,
         swap_every: int,
+        initial_sequences: dict[str, str] | None = None,
     ) -> DesignResult:
         """
         Parallel-tempering trial.  Each chain runs at a fixed temperature
@@ -263,7 +272,7 @@ class SequenceDesigner:
         chains_scores: list[float] = []
         chains_policies: list[MutationPolicy] = []
         for _ in range(n_chains):
-            s = self._initialize(domains, rng, constraints)
+            s = self._initialize(domains, rng, constraints, initial_sequences)
             chains_seqs.append(s)
             chains_scores.append(objective(s))
             chains_policies.append(mutation_policy or RandomMutationPolicy())
@@ -319,19 +328,25 @@ class SequenceDesigner:
         domains: dict[str, "DomainSpec"],
         rng: random.Random,
         constraints: list["HardConstraint"] | None = None,
+        initial_sequences: dict[str, str] | None = None,
     ) -> dict[str, str]:
         """
-        Generate random starting sequences for free domains; use fixed
-        sequences as-is.  Retries up to 64 times per free domain to land
-        in a hard-constraint-feasible starting point before giving up
-        and emitting an unconstrained random sequence (the SA loop will
-        re-reject it).
+        Generate starting sequences for free domains; use fixed sequences
+        as-is.  A free domain present in ``initial_sequences`` is warm-started
+        from that sequence (the gradient-designer hand-off); otherwise the
+        optimizer retries up to 64 times to land in a hard-constraint-feasible
+        random start before giving up and emitting an unconstrained random
+        sequence (the SA loop will re-reject it).
         """
         seqs: dict[str, str] = {}
         cs = constraints or []
+        warm = initial_sequences or {}
         for name, spec in domains.items():
             if spec.sequence is not None:
                 seqs[name] = spec.sequence.upper().replace("U", "T")
+                continue
+            if name in warm and warm[name]:
+                seqs[name] = warm[name].upper().replace("U", "T")
                 continue
             bases = _bases_for(spec.material)
             attempt = ""

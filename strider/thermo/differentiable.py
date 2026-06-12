@@ -201,7 +201,21 @@ class BatchedPartitionFunction(nn.Module):
         super().__init__()
         self.params = params
 
-    def forward(self, sequences: list[str]) -> torch.Tensor:
+    def forward(self, sequences: list[str], bias: torch.Tensor | None = None,
+                nicks: list[int] | None = None) -> torch.Tensor:
+        """
+        Ensemble free energy ΔG (kcal/mol) for a batch of discrete sequences.
+
+        ``bias`` is an optional per-pair energy field of shape ``(B, max_N, max_N)``
+        added to the closing-pair entry ``V[i, j]`` of the DP.  It is the hook
+        that makes base-pairing probabilities fall out by autograd: because the
+        returned free energy is ``F = -RT ln Z`` and ``bias[i, j]`` perturbs the
+        energy of *every* structure in which ``(i, j)`` is paired, the gradient
+        ``∂F/∂bias[i, j]`` equals the McCaskill pair probability ``P(i, j)``.  A
+        single zero-valued ``bias`` plus one backward pass therefore yields the
+        whole BPP matrix (see :meth:`pair_probabilities`).  Default ``None``
+        leaves the original fast path untouched.
+        """
         material = self.params.material
         normalized_seqs = []
         for seq in sequences:
@@ -247,6 +261,41 @@ class BatchedPartitionFunction(nn.Module):
         lengths_t = torch.tensor([len(s) for s in sequences], device=device)
         real = torch.arange(max_N, device=device).unsqueeze(0) < lengths_t.unsqueeze(1)
         can_pair_mask = can & real.unsqueeze(2) & real.unsqueeze(1)
+
+        # ── Nick / separation masks (multi-strand complexes) ─────────────────
+        # ``nicks`` are the cumulative strand lengths (0 < nick < N), i.e. the
+        # positions where one strand ends and the next begins.  A pair (i, j)
+        # is *inter*-strand when a nick lies in (i, j] and *spans* a nick when
+        # one lies strictly inside (i, j).  Matching ensemble.py:_can_pair_nicks
+        # / _qb_val: cross-nick pairs may close at any separation (no minimum
+        # loop), hairpins may not span a nick, and an inter-strand pair whose
+        # immediate inner pair cannot form carries a terminal-pair penalty leaf
+        # (the base case of an inter-strand helix).  With ``nicks=None`` every
+        # mask collapses to the original single-strand behaviour.
+        row = torch.arange(max_N, device=device)
+        sep_gt = (row.unsqueeze(0) - row.unsqueeze(1)) > MIN_HAIRPIN_LOOP  # [i,j]: j-i>3
+        if nicks:
+            nset = sorted({int(k) for k in nicks if 0 < k < max_N})
+            if nset:
+                nt = torch.tensor(nset, device=device)
+                prefix = (nt.unsqueeze(0) <= row.unsqueeze(1)).sum(dim=1)  # #nicks <= t
+            else:
+                prefix = torch.zeros(max_N, dtype=torch.long, device=device)
+            is_inter_m = (prefix.unsqueeze(0) - prefix.unsqueeze(1)) > 0      # nick in (i,j]
+            jm1 = torch.clamp(row - 1, min=0)
+            spans_m = (prefix[jm1].unsqueeze(0) - prefix.unsqueeze(1)) > 0    # nick in (i,j)
+            no_span_m = ~spans_m
+            pair_allowed_sep = is_inter_m | sep_gt
+        else:
+            is_inter_m = torch.zeros(max_N, max_N, dtype=torch.bool, device=device)
+            no_span_m = torch.ones(max_N, max_N, dtype=torch.bool, device=device)
+            pair_allowed_sep = sep_gt
+        # Pairs that may actually close, base-compatibility AND separation/nick
+        # rule.  Equivalent to ``can_pair_mask`` on the single-strand path (where
+        # the DP's V=INF already encodes the separation rule), so reusing it in
+        # the stack masks below leaves single-strand results unchanged.
+        pair_allowed = can_pair_mask & pair_allowed_sep
+        has_nicks = bool(nicks)
 
         # Hairpin closing-pair bonus (terminal penalty + tri/tetraloop tables).
         # The special-loop lookups are inherently dict-based; we accumulate into
@@ -309,13 +358,28 @@ class BatchedPartitionFunction(nn.Module):
                     term_penalty = torch.zeros(B, num_i, dtype=torch.float64, device=device)
 
                 bonus = hairpin_bonus[:, i_idx, j_idx]
-                v_hp = torch.where(pair_mask, hp_e_tensor + term_penalty + bonus, torch.tensor(INF, dtype=torch.float64, device=device))
+                hp_mask = pair_mask & no_span_m[i_idx, j_idx] if has_nicks else pair_mask
+                v_hp = torch.where(hp_mask, hp_e_tensor + term_penalty + bonus, torch.tensor(INF, dtype=torch.float64, device=device))
                 v_options.append(v_hp)
-                
+
+            # 1b. Inter-strand helix base case: an inter-strand pair (i,j) whose
+            #     immediate inner pair (i+1, j-1) cannot form carries a
+            #     terminal-pair penalty leaf (ensemble.py:_qb_val, is_inter branch).
+            if has_nicks:
+                inter_ij = is_inter_m[i_idx, j_idx]
+                inner_allowed = pair_allowed[:, torch.clamp(i_idx + 1, max=max_N - 1),
+                                             torch.clamp(j_idx - 1, min=0)]
+                leaf_mask = pair_mask & inter_ij.unsqueeze(0) & (~inner_allowed)
+                tp_leaf = self.params.terminal_penalty_lut[
+                    base_indices[:, i_idx], base_indices[:, j_idx]]
+                v_leaf = torch.where(leaf_mask, tp_leaf,
+                                     torch.tensor(INF, dtype=torch.float64, device=device))
+                v_options.append(v_leaf)
+
             # 2. Base Pair Stacking
-            if d > MIN_HAIRPIN_LOOP + 1:
-                inner_pair_mask = can_pair_mask[:, i_idx+1, j_idx-1]
-                valid_stack = pair_mask & inner_pair_mask
+            if d > MIN_HAIRPIN_LOOP + 1 or (has_nicks and d >= 3):
+                inner_pair_mask = pair_allowed[:, i_idx+1, j_idx-1]
+                valid_stack = pair_allowed[:, i_idx, j_idx] & inner_pair_mask
 
                 # Full 4-base stack lookup: key seq[i],seq[i+1],seq[j-1],seq[j]
                 # (matches ensemble._stack_energy), so GU-wobble stacks use their
@@ -351,8 +415,9 @@ class BatchedPartitionFunction(nn.Module):
                     jp_safe = torch.clamp(jp_idx, min=0)
                     
                     inner_v = V[:, ip_safe, jp_safe]
-                    inner_pair_mask = can_pair_mask[:, ip_safe, jp_safe]
-                    valid_interior = valid_ip_jp.unsqueeze(0) & inner_pair_mask & pair_mask.unsqueeze(2)
+                    inner_pair_mask = pair_allowed[:, ip_safe, jp_safe]
+                    outer_ok = (pair_allowed[:, i_idx, j_idx] if has_nicks else pair_mask)
+                    valid_interior = valid_ip_jp.unsqueeze(0) & inner_pair_mask & outer_ok.unsqueeze(2)
                     
                     is_bulge = (nl_tensor == 0) | (nr_tensor == 0)
                     n_tensor = torch.tensor(n, device=device)
@@ -510,12 +575,16 @@ class BatchedPartitionFunction(nn.Module):
                 # Outer closing pair (i, j) charges ml_init + ml_pair, matching
                 # ensemble.py:395 (bm_ml_init_pair = boltz(ML_INIT + ML_PAIR)).
                 v_bif = v_bif + ml_init + ml_pair
-                v_bif = torch.where(pair_mask, v_bif, torch.tensor(INF, dtype=torch.float64, device=device))
+                bif_mask = pair_allowed[:, i_idx, j_idx] if has_nicks else pair_mask
+                v_bif = torch.where(bif_mask, v_bif, torch.tensor(INF, dtype=torch.float64, device=device))
                 v_options.append(v_bif)
                 
             if v_options:
-                V[:, i_idx, j_idx] = logsumexp_RT(v_options, dim=0)
-            
+                v_ij = logsumexp_RT(v_options, dim=0)
+                if bias is not None:
+                    v_ij = v_ij + bias[:, i_idx, j_idx]
+                V[:, i_idx, j_idx] = v_ij
+
             # 5. Populate External Loop (W) and Multiloop (M) Segments
             
             # A. Compute M1 (Exactly one stem, flush right, grows left)
@@ -627,7 +696,8 @@ class BatchedPartitionFunction(nn.Module):
             
         return torch.stack(res)
 
-    def soft_forward(self, probs: torch.Tensor) -> torch.Tensor:
+    def soft_forward(self, probs: torch.Tensor, bias: torch.Tensor | None = None,
+                     nicks: list[int] | None = None) -> torch.Tensor:
         """
         Sequence-differentiable ensemble free energy ΔG (kcal/mol).
 
@@ -678,6 +748,24 @@ class BatchedPartitionFunction(nn.Module):
         cval = torch.einsum("biw,bjx,wx->bij", probs, probs, pairf)
         pairpen = -RT * torch.log(cval + 1e-9)
 
+        # Nick / separation masks (see ``forward``): boolean, sequence-independent.
+        row = torch.arange(N, device=device)
+        sep_gt = (row.unsqueeze(0) - row.unsqueeze(1)) > MIN_HAIRPIN_LOOP  # [i,j]: j-i>3
+        has_nicks = bool(nicks)
+        if has_nicks:
+            nset = sorted({int(k) for k in nicks if 0 < k < N})
+            prefix = ((torch.tensor(nset, device=device).unsqueeze(0) <= row.unsqueeze(1)).sum(dim=1)
+                      if nset else torch.zeros(N, dtype=torch.long, device=device))
+            is_inter_m = (prefix.unsqueeze(0) - prefix.unsqueeze(1)) > 0
+            jm1 = torch.clamp(row - 1, min=0)
+            no_span_m = ~((prefix[jm1].unsqueeze(0) - prefix.unsqueeze(1)) > 0)
+            pair_allowed_sep = is_inter_m | sep_gt
+            INF_NN = torch.where(pair_allowed_sep, torch.zeros((), dtype=dtype, device=device),
+                                 torch.full((), INF, dtype=dtype, device=device))
+        else:
+            is_inter_m = no_span_m = None
+            pair_allowed_sep = sep_gt
+
         V = torch.full((B, N, N), INF, dtype=dtype, device=device)
         W = torch.zeros((B, N, N), dtype=dtype, device=device)
         M = torch.full((B, N, N), INF, dtype=dtype, device=device)
@@ -705,14 +793,31 @@ class BatchedPartitionFunction(nn.Module):
                 else:
                     term_penalty = ZERO_T
                 bonus = torch.einsum("bnw,bnx,wx->bn", pi, pj, tp)  # terminal penalty
-                v_options.append(hp_e + term_penalty + bonus)
+                hp = hp_e + term_penalty + bonus
+                if has_nicks:  # no hairpin may span a nick
+                    hp = torch.where(no_span_m[i_idx, j_idx].unsqueeze(0), hp, INF_T)
+                v_options.append(hp)
+
+            # 1b. Inter-strand helix base case (terminal-pair penalty leaf): an
+            #     inter-strand pair whose immediate inner pair cannot form.
+            if has_nicks:
+                inter_ij = is_inter_m[i_idx, j_idx]
+                ip1 = torch.clamp(i_idx + 1, max=N - 1)
+                jm1c = torch.clamp(j_idx - 1, min=0)
+                inner_sep_ok = pair_allowed_sep[ip1, jm1c]
+                leaf = torch.einsum("bnw,bnx,wx->bn", pi, pj, tp)   # expected TP penalty
+                leaf = torch.where((inter_ij & ~inner_sep_ok).unsqueeze(0), leaf, INF_T)
+                v_options.append(leaf)
 
             # 2. Stacking onto the inner pair (i+1, j-1)
-            if d > MIN_HAIRPIN_LOOP + 1:
+            if d > MIN_HAIRPIN_LOOP + 1 or (has_nicks and d >= 3):
                 stack_val = torch.einsum(
                     "bnw,bnx,bny,bnz,wxyz->bn",
                     pi, probs[:, i_idx + 1], probs[:, j_idx - 1], pj, stack4)
-                v_options.append(stack_val + V[:, i_idx + 1, j_idx - 1])
+                stack_opt = stack_val + V[:, i_idx + 1, j_idx - 1]
+                if has_nicks:  # only inter pairs may stack at sub-loop separation
+                    stack_opt = stack_opt + INF_NN[i_idx, j_idx].unsqueeze(0)
+                v_options.append(stack_opt)
 
             # 3. Interior loops & bulges (size/asymmetry penalties are sequence
             #    independent; only the terminal-pair and single-bulge-stack
@@ -780,7 +885,13 @@ class BatchedPartitionFunction(nn.Module):
             if v_options:
                 # Add the soft closing-pair penalty once: every contribution to
                 # V[i,j] requires (i,j) to actually pair.
-                V[:, i_idx, j_idx] = logsumexp_RT(v_options, dim=0) + pairpen[:, i_idx, j_idx]
+                v_ij = logsumexp_RT(v_options, dim=0) + pairpen[:, i_idx, j_idx]
+                if has_nicks:  # forbid disallowed-separation (sub-loop intra) pairs
+                    v_ij = v_ij + INF_NN[i_idx, j_idx].unsqueeze(0)
+                # Per-pair energy bias: ∂F/∂bias[i,j] = P(i,j) (soft BPP).
+                if bias is not None:
+                    v_ij = v_ij + bias[:, i_idx, j_idx]
+                V[:, i_idx, j_idx] = v_ij
 
             # M1 / M (multiloop segments)
             m1_options = [V[:, i_idx, j_idx] + ml_pair]
@@ -826,6 +937,90 @@ class BatchedPartitionFunction(nn.Module):
 
         return W[:, 0, N - 1]
 
+    # ── Base-pair probabilities (McCaskill BPP via autodiff) ─────────────────
+    #
+    # The identity ``P(i, j) = ∂F/∂ε_ij`` — pair probability equals the
+    # derivative of the ensemble free energy with respect to an energy that is
+    # charged whenever (i, j) is paired — turns one backward pass over a
+    # zero-valued ``bias`` field into the full BPP matrix.  This is exact (not a
+    # heuristic), reduces to McCaskill's outside recursion, and — crucially for
+    # design — is differentiable a second time w.r.t. a soft sequence, so losses
+    # built on the BPP (ensemble defect, accessibility, entropy) propagate
+    # gradients back to ``probs``.
+
+    def _bpp_from_grad(self, free_energy: torch.Tensor, bias: torch.Tensor,
+                       create_graph: bool) -> torch.Tensor:
+        """Differentiate ``F`` w.r.t. the per-pair ``bias`` field and symmetrize.
+
+        The DP fills only the upper triangle ``i < j``, so the raw gradient is
+        upper-triangular; adding its transpose yields a symmetric matrix with
+        ``bpp[i, j] = bpp[j, i] = P(i, j)`` and a zero diagonal.
+        """
+        (grad,) = torch.autograd.grad(
+            free_energy.sum(), bias, create_graph=create_graph)
+        return grad + grad.transpose(-1, -2)
+
+    def free_energy_and_bpp(self, sequences: list[str],
+                            nicks: list[int] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(free_energy (B,), bpp (B, N, N))`` for discrete sequences.
+
+        Folds once with an autograd hook on the closing-pair energies, so the
+        free energy and the entire pair-probability matrix come out of a single
+        forward + backward pass.  Runs under :func:`torch.enable_grad` even if
+        called inside ``torch.no_grad`` (the gradient *is* the answer here).
+        """
+        device = self.params.stack_table.device
+        B = len(sequences)
+        max_N = max((len(s) for s in sequences), default=0)
+        with torch.enable_grad():
+            bias = torch.zeros(B, max_N, max_N, dtype=torch.float64,
+                               device=device, requires_grad=True)
+            free_energy = self.forward(sequences, bias=bias, nicks=nicks)
+            bpp = self._bpp_from_grad(free_energy, bias, create_graph=False)
+        return free_energy.detach(), bpp.detach()
+
+    def pair_probabilities(self, sequences: list[str],
+                           nicks: list[int] | None = None) -> torch.Tensor:
+        """Pair-probability matrix ``(B, N, N)`` for discrete sequences."""
+        return self.free_energy_and_bpp(sequences, nicks=nicks)[1]
+
+    def soft_pair_probabilities(self, probs: torch.Tensor,
+                                nicks: list[int] | None = None) -> torch.Tensor:
+        """Sequence-differentiable pair-probability matrix ``(B, N, N)``.
+
+        The returned tensor is differentiable w.r.t. ``probs`` (second-order
+        autograd via ``create_graph=True``), which is what lets BPP-based design
+        losses backpropagate to the soft sequence.  Pass ``nicks`` (cumulative
+        strand lengths) for a multi-strand complex.
+        """
+        return self.soft_free_energy_and_bpp(probs, nicks=nicks)[1]
+
+    def soft_free_energy_and_bpp(self, probs: torch.Tensor,
+                                 nicks: list[int] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(free_energy (B,), bpp (B, N, N))`` for a soft sequence.
+
+        Both outputs are differentiable w.r.t. ``probs`` (the free energy
+        directly, the BPP via ``create_graph``) and share a single DP pass — so a
+        design objective with both a ΔG term and a defect/accessibility term folds
+        the sequence only once per evaluation.
+
+        The internal bias-gradient pass always runs under :func:`torch.enable_grad`
+        (the gradient *is* the BPP), so this works even when called inside
+        ``torch.no_grad`` for plain scoring.  Second-order graph retention is
+        switched on only when ``probs`` itself carries gradients — i.e. when the
+        caller intends to backprop a BPP-based loss to the sequence.
+        """
+        B, N, _ = probs.shape
+        create_graph = probs.requires_grad
+        with torch.enable_grad():
+            bias = torch.zeros(B, N, N, dtype=probs.dtype, device=probs.device,
+                               requires_grad=True)
+            free_energy = self.soft_forward(probs, bias=bias, nicks=nicks)
+            bpp = self._bpp_from_grad(free_energy, bias, create_graph=create_graph)
+        if not create_graph:
+            free_energy, bpp = free_energy.detach(), bpp.detach()
+        return free_energy, bpp
+
 
 DifferentiableMFE = BatchedPartitionFunction
 
@@ -857,6 +1052,41 @@ def soft_free_energy(probs: torch.Tensor, material: str = "rna",
     if probs.device != params.stack_table.device:
         params = params.to(probs.device)
     return BatchedPartitionFunction(params).soft_forward(probs)
+
+
+def pair_probabilities(
+    sequences: list[str],
+    material: str = "rna",
+    device: str | None = None,
+    params: "ThermoParameters | None" = None,
+) -> torch.Tensor:
+    """McCaskill base-pair-probability matrix ``(B, N, N)`` for discrete sequences.
+
+    Computed by autodiff of the ensemble free energy (``∂F/∂ε_ij = P(i,j)``); see
+    :meth:`BatchedPartitionFunction.free_energy_and_bpp`.  Detached / inference use.
+    """
+    if params is None:
+        params = ThermoParameters(material=material)
+    if device is not None:
+        params = params.to(device)
+    return BatchedPartitionFunction(params).pair_probabilities(sequences)
+
+
+def soft_pair_probabilities(
+    probs: torch.Tensor,
+    material: str = "rna",
+    params: "ThermoParameters | None" = None,
+) -> torch.Tensor:
+    """Sequence-differentiable BPP matrix ``(B, N, N)`` for a soft sequence.
+
+    The result is differentiable w.r.t. ``probs`` — the foundation every
+    BPP-based design loss (ensemble defect, accessibility, entropy) is built on.
+    """
+    if params is None:
+        params = ThermoParameters(material=material)
+    if probs.device != params.stack_table.device:
+        params = params.to(probs.device)
+    return BatchedPartitionFunction(params).soft_pair_probabilities(probs)
 
 
 def batched_free_energy(
@@ -896,3 +1126,66 @@ def batched_free_energy(
         return model(sequences)
     with torch.no_grad():
         return model(sequences)
+
+
+def concat_with_nicks(strands: list[str]) -> tuple[str, list[int]]:
+    """Concatenate strands and return ``(joined, nicks)`` (cumulative lengths)."""
+    nicks, pos = [], 0
+    for s in strands[:-1]:
+        pos += len(s)
+        nicks.append(pos)
+    return "".join(strands), nicks
+
+
+def _symmetry_dg(strands: list[str]) -> float:
+    """Rotational-symmetry free-energy correction ``+RT·ln σ`` (Dirks 2007).
+
+    The nick-aware DP folds the *ordered* concatenation, so a homomeric complex
+    over-counts rotationally by σ; native ``ThermoEngine.pfunc`` applies the same
+    correction.  σ depends only on strand identity, so it shifts the free energy
+    but leaves pair probabilities (and hence ensemble defect) unchanged.
+    """
+    try:
+        from strider.equilibrium import cyclic_symmetry
+        sigma = cyclic_symmetry(list(strands))
+    except Exception:
+        sigma = 1
+    return RT * math.log(sigma) if sigma > 1 else 0.0
+
+
+def complex_free_energy(
+    strands: list[str],
+    material: str = "rna",
+    params: "ThermoParameters | None" = None,
+    symmetry: bool = True,
+) -> torch.Tensor:
+    """Ensemble free energy ΔG (kcal/mol) of a multi-strand complex.
+
+    Folds the nick-aware concatenation and (by default) applies the rotational
+    symmetry correction so the value matches ``ThermoEngine.pfunc(*strands)``.
+    """
+    if params is None:
+        params = ThermoParameters(material=material)
+    model = BatchedPartitionFunction(params)
+    seq, nicks = concat_with_nicks(strands)
+    with torch.no_grad():
+        fe = model([seq], nicks=nicks)
+    if symmetry:
+        fe = fe + _symmetry_dg(strands)
+    return fe
+
+
+def complex_pair_probabilities(
+    strands: list[str],
+    material: str = "rna",
+    params: "ThermoParameters | None" = None,
+) -> torch.Tensor:
+    """Pair-probability matrix ``(N, N)`` of a multi-strand complex (N = total length).
+
+    Symmetry-independent (σ cancels in the BPP), so no correction is applied.
+    """
+    if params is None:
+        params = ThermoParameters(material=material)
+    model = BatchedPartitionFunction(params)
+    seq, nicks = concat_with_nicks(strands)
+    return model.pair_probabilities([seq], nicks=nicks)[0]

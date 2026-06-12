@@ -80,6 +80,8 @@ from strider.kinetics.enumerator import (
 from strider.design.objective import DesignObjective
 from strider.design.constraints import HardConstraint
 from strider.design.optimizer import SequenceDesigner, DomainSpec, DesignResult
+from strider.design.diff_designer import DifferentiableDesigner
+from strider.thermo.diff_design import DiffObjective
 from strider.design.mutation import MutationAnalyzer, MutationProfile
 from strider.design.assay import Assay, AssayPanel, Assembly
 from strider.design.policies import (
@@ -162,6 +164,7 @@ __all__ = [
     # Design
     "DesignObjective", "HardConstraint",
     "SequenceDesigner", "DomainSpec", "DesignResult",
+    "DifferentiableDesigner", "DiffObjective",
     "MutationAnalyzer", "MutationProfile",
     "Assay", "AssayPanel", "Assembly",
     "MutationPolicy", "RandomMutationPolicy", "DefectWeightedPolicy",
